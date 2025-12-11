@@ -1,0 +1,17 @@
+.env
+venv*/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.bot_token
+
+# Local runtime data (persist on VPS via ./data volume)
+data/
+users_db.json
+plans.json
+bot_logs.txt
+
+# OS/editor
+.DS_Store
+.vscode/

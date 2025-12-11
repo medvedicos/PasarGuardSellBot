@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+venv312/
+.env
+data/
+users_db.json
+plans.json
+bot_logs.txt
+.git/
+.gitignore

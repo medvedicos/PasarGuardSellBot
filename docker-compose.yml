@@ -1,0 +1,11 @@
+services:
+  marzbanbot:
+    build:
+      context: .
+    container_name: marzbanbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    working_dir: /data
+    volumes:
+      - ./data:/data
