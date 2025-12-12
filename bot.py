@@ -462,6 +462,7 @@ async def cb_admin_promo_list(cq: types.CallbackQuery):
         return
 
     active_lines = []
+    buttons = []
     now_ts = int(datetime.now(timezone.utc).timestamp())
 
     for code, promo in promos_db.items():
@@ -488,6 +489,8 @@ async def cb_admin_promo_list(cq: types.CallbackQuery):
             exp_text = "без срока"
 
         active_lines.append(f"• <code>{code}</code> — {percent}% ({plans_text}), до {exp_text}")
+        # Manage button (keep callback short; promo code is capped on creation)
+        buttons.append([types.InlineKeyboardButton(text=f"⚙️ {code}", callback_data=f"admin_promo_manage:{code}")])
 
     text = "🎟 <b>Активные промокоды:</b>\n\n"
     if active_lines:
@@ -495,11 +498,93 @@ async def cb_admin_promo_list(cq: types.CallbackQuery):
     else:
         text += "Пока нет активных промокодов."
 
+    # Put manage buttons first, then actions
+    buttons.append([types.InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_promo_create")])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_promos")])
+    kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("admin_promo_manage:"))
+async def cb_admin_promo_manage(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    code = normalize_promo_code(cq.data.split(":", 1)[1])
+    promo = promos_db.get(code)
+    if not isinstance(promo, dict):
+        await cq.answer("Промокод не найден", show_alert=True)
+        return
+
+    percent = promo.get("percent")
+    plans = promo.get("plans")
+    expires_at = promo.get("expires_at")
+    active = promo.get("active", True)
+
+    if plans == "*" or (isinstance(plans, list) and "*" in plans):
+        plans_text = "все тарифы"
+    elif isinstance(plans, list):
+        plans_text = ", ".join(plans)
+    else:
+        plans_text = "—"
+
+    if expires_at:
+        exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+        exp_text = exp_dt.strftime("%d.%m.%Y")
+    else:
+        exp_text = "без срока"
+
+    status_text = "✅ активен" if active else "⛔ отключён"
+
+    text = (
+        "🎟 <b>Промокод</b>\n\n"
+        f"<b>Код:</b> <code>{code}</code>\n"
+        f"<b>Скидка:</b> {percent}%\n"
+        f"<b>Тарифы:</b> {plans_text}\n"
+        f"<b>Срок:</b> до {exp_text}\n"
+        f"<b>Статус:</b> {status_text}"
+    )
+
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_promo_create")],
-        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_promos")],
+        [types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"admin_promo_disable:{code}"),
+         types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin_promo_delete:{code}")],
+        [types.InlineKeyboardButton(text="🔙 К списку", callback_data="admin_promo_list")],
     ])
     await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("admin_promo_disable:"))
+async def cb_admin_promo_disable(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    code = normalize_promo_code(cq.data.split(":", 1)[1])
+    promo = promos_db.get(code)
+    if not isinstance(promo, dict):
+        await cq.answer("Промокод не найден", show_alert=True)
+        return
+
+    promo["active"] = False
+    promos_db[code] = promo
+    save_promos_db(promos_db)
+    await cq.answer("✅ Промокод отключён", show_alert=True)
+    await cb_admin_promo_manage(cq)
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("admin_promo_delete:"))
+async def cb_admin_promo_delete(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    code = normalize_promo_code(cq.data.split(":", 1)[1])
+    if code not in promos_db:
+        await cq.answer("Промокод не найден", show_alert=True)
+        return
+
+    promos_db.pop(code, None)
+    save_promos_db(promos_db)
+    await cq.answer("🗑 Промокод удалён", show_alert=True)
+    await cb_admin_promo_list(cq)
 
 
 @dp.callback_query(lambda cq: cq.data == "admin_promo_create")
@@ -528,6 +613,11 @@ async def admin_promo_code(m: Message, state: FSMContext):
     code = normalize_promo_code(m.text)
     if not code or len(code) < 3:
         await m.answer("❌ Введите промокод минимум из 3 символов.")
+        return
+
+    # keep callback_data safe (Telegram limit is 64 bytes)
+    if len(code) > 32:
+        await m.answer("❌ Слишком длинный промокод. Максимум 32 символа.")
         return
 
     await state.update_data(code=code)
