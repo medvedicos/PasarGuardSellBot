@@ -1,4 +1,6 @@
 aiogram==3.5.0
-aiohttp==3.8.4
+# aiohttp 3.8.x is not compatible with Python 3.12 (no wheels / build issues)
+aiohttp==3.10.11
 python-dotenv==1.0.0
-marzpy==0.0.6   # необязательно — я показал пример с прямыми запросами, но библиотека может помочь
+# marzpy 0.0.6 is not published on PyPI; latest available is 0.0.5
+marzpy==0.0.5
