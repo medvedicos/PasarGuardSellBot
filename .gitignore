@@ -10,6 +10,8 @@ __pycache__/
 data/
 users_db.json
 plans.json
+promos.json
+promo_usage.json
 bot_logs.txt
 
 # OS/editor

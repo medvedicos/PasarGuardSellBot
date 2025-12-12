@@ -23,6 +23,7 @@ ADMIN_ID = 430301005
 USERS_DB_FILE = "users_db.json"
 PLANS_FILE = "plans.json"
 PROMOS_FILE = "promos.json"
+PROMO_USAGE_FILE = "promo_usage.json"
 
 def load_users_db():
     """Load users database"""
@@ -67,6 +68,27 @@ def save_promos_db(data):
 promos_db = load_promos_db()
 
 
+def load_promo_usage_db():
+    if os.path.exists(PROMO_USAGE_FILE):
+        try:
+            with open(PROMO_USAGE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading promo usage DB: {e}")
+    return {}
+
+
+def save_promo_usage_db(data):
+    try:
+        with open(PROMO_USAGE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving promo usage DB: {e}")
+
+
+promo_usage_db = load_promo_usage_db()
+
+
 def normalize_promo_code(code: str) -> str:
     return (code or "").strip().upper()
 
@@ -108,12 +130,29 @@ def get_valid_promo(code: str):
     return promo
 
 
-def get_user_used_promos(mb_username: str):
-    entry = users_db.get(mb_username, {})
+def get_used_promos_for_tg_id(tg_id: int):
+    entry = promo_usage_db.get(str(tg_id), {})
     used = entry.get("used_promos")
     if isinstance(used, list):
         return [normalize_promo_code(x) for x in used if isinstance(x, str)]
     return []
+
+
+def mark_promo_used_for_tg_id(tg_id: int, code: str):
+    code = normalize_promo_code(code)
+    if not code:
+        return
+    key = str(tg_id)
+    promo_usage_db.setdefault(key, {})
+    used = promo_usage_db[key].get("used_promos")
+    if not isinstance(used, list):
+        used = []
+    normalized_used = [normalize_promo_code(x) for x in used if isinstance(x, str)]
+    if code not in normalized_used:
+        used.append(code)
+    promo_usage_db[key]["used_promos"] = used
+    promo_usage_db[key]["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_promo_usage_db(promo_usage_db)
 
 
 def get_user_pending_promo_code(mb_username: str):
@@ -917,7 +956,7 @@ async def promo_user_entered(m: Message, state: FSMContext):
         await m.answer("❌ Промокод недействителен или истёк.")
         return
 
-    used = get_user_used_promos(mb_username)
+    used = get_used_promos_for_tg_id(tg_user.id)
     if code in used:
         await m.answer("❌ Этот промокод уже использован на вашем аккаунте.")
         return
@@ -1164,7 +1203,7 @@ async def cb_renew(cq: types.CallbackQuery):
     pending_code = get_user_pending_promo_code(mb_username)
     if pending_code:
         promo = get_valid_promo(pending_code)
-        if promo and promo_applies_to_plan(promo, plan_key) and pending_code not in get_user_used_promos(mb_username):
+        if promo and promo_applies_to_plan(promo, plan_key) and pending_code not in get_used_promos_for_tg_id(tg_user.id):
             percent = int(promo["percent"])
             discounted = (base_price * (100 - percent)) // 100
             final_price = max(1, int(discounted))
@@ -1213,7 +1252,7 @@ async def cb_buy(cq: types.CallbackQuery):
     pending_code = get_user_pending_promo_code(mb_username)
     if pending_code:
         promo = get_valid_promo(pending_code)
-        if promo and promo_applies_to_plan(promo, plan_key) and pending_code not in get_user_used_promos(mb_username):
+        if promo and promo_applies_to_plan(promo, plan_key) and pending_code not in get_used_promos_for_tg_id(tg_user.id):
             percent = int(promo["percent"])
             discounted = (base_price * (100 - percent)) // 100
             final_price = max(1, int(discounted))
@@ -1308,25 +1347,18 @@ async def on_success(m: Message):
         await m.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
         return
 
-    # Mark promo as used (one time per account)
+    # Mark promo as used (one time per Telegram account)
     if applied_promo and plan_key:
         promo = get_valid_promo(applied_promo)
         if promo and promo_applies_to_plan(promo, plan_key):
-            users_db.setdefault(mb_username, {})
-            used = users_db[mb_username].get("used_promos")
-            if not isinstance(used, list):
-                used = []
-            normalized_used = [normalize_promo_code(x) for x in used if isinstance(x, str)]
-            if applied_promo not in normalized_used:
-                used.append(applied_promo)
-            users_db[mb_username]["used_promos"] = used
+            mark_promo_used_for_tg_id(tg_user.id, applied_promo)
 
-            # Clear pending promo if it matches
+            # Clear pending promo (stored by marzban username)
+            users_db.setdefault(mb_username, {})
             if normalize_promo_code(users_db[mb_username].get("pending_promo")) == applied_promo:
                 users_db[mb_username].pop("pending_promo", None)
                 users_db[mb_username].pop("pending_promo_set_at", None)
-
-            save_users_db(users_db)
+                save_users_db(users_db)
     
     # Save or update user to database for notification system
     users_db[mb_username] = {
