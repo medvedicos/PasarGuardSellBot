@@ -4,6 +4,7 @@ services:
       context: .
     container_name: marzbanbot
     restart: unless-stopped
+    user: "0:0"
     env_file:
       - .env
     working_dir: /data
