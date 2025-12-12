@@ -22,6 +22,7 @@ ADMIN_ID = 430301005
 # Users database file for storing user_id -> username mapping
 USERS_DB_FILE = "users_db.json"
 PLANS_FILE = "plans.json"
+PROMOS_FILE = "promos.json"
 
 def load_users_db():
     """Load users database"""
@@ -43,6 +44,84 @@ def save_users_db(data):
 
 # Load users database at startup
 users_db = load_users_db()
+
+
+def load_promos_db():
+    if os.path.exists(PROMOS_FILE):
+        try:
+            with open(PROMOS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading promos DB: {e}")
+    return {}
+
+
+def save_promos_db(data):
+    try:
+        with open(PROMOS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving promos DB: {e}")
+
+
+promos_db = load_promos_db()
+
+
+def normalize_promo_code(code: str) -> str:
+    return (code or "").strip().upper()
+
+
+def promo_is_expired(promo: dict) -> bool:
+    expires_at = promo.get("expires_at")
+    if not expires_at:
+        return False
+    return int(expires_at) <= int(datetime.now(timezone.utc).timestamp())
+
+
+def promo_applies_to_plan(promo: dict, plan_key: str) -> bool:
+    plans = promo.get("plans")
+    if not plans:
+        return False
+    if isinstance(plans, str) and plans == "*":
+        return True
+    if isinstance(plans, list) and "*" in plans:
+        return True
+    if isinstance(plans, list):
+        return plan_key in plans
+    return False
+
+
+def get_valid_promo(code: str):
+    code = normalize_promo_code(code)
+    if not code:
+        return None
+    promo = promos_db.get(code)
+    if not isinstance(promo, dict):
+        return None
+    if promo.get("active") is False:
+        return None
+    if promo_is_expired(promo):
+        return None
+    percent = promo.get("percent")
+    if not isinstance(percent, int) or percent <= 0 or percent >= 100:
+        return None
+    return promo
+
+
+def get_user_used_promos(mb_username: str):
+    entry = users_db.get(mb_username, {})
+    used = entry.get("used_promos")
+    if isinstance(used, list):
+        return [normalize_promo_code(x) for x in used if isinstance(x, str)]
+    return []
+
+
+def get_user_pending_promo_code(mb_username: str):
+    entry = users_db.get(mb_username, {})
+    code = entry.get("pending_promo")
+    if isinstance(code, str) and code.strip():
+        return normalize_promo_code(code)
+    return None
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://yourdomain.com/webhook/telegram
@@ -112,6 +191,17 @@ PLANS = load_plans()
 
 class AdminStates(StatesGroup):
     waiting_for_price = State()
+
+
+class AdminPromoStates(StatesGroup):
+    waiting_for_code = State()
+    waiting_for_percent = State()
+    waiting_for_plans = State()
+    waiting_for_days = State()
+
+
+class PromoUserStates(StatesGroup):
+    waiting_for_code = State()
 
 # Get user subscription info from Marzban
 async def marzban_get_user(username: str):
@@ -211,6 +301,7 @@ def get_buy_keyboard():
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['m3']['title']} — {PLANS['m3']['price']} ⭐️ (~{PLANS['m3']['price_rub']}₽)", callback_data="buy:m3")],
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['m6']['title']} — {PLANS['m6']['price']} ⭐️ (~{PLANS['m6']['price_rub']}₽)", callback_data="buy:m6")],
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['y1']['title']} — {PLANS['y1']['price']} ⭐️ (~{PLANS['y1']['price_rub']}₽)", callback_data="buy:y1")],
+        [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:buy")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")],
     ])
     return kb
@@ -346,9 +437,190 @@ async def cmd_admin(m: Message):
     
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="💰 Сменить тарифы", callback_data="admin_prices")],
+        [types.InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin_promos")],
     ])
     
     await m.answer("🛠 <b>Админ-панель</b>", reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(lambda cq: cq.data == "admin_promos")
+async def cb_admin_promos(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_promo_create")],
+        [types.InlineKeyboardButton(text="📋 Список промокодов", callback_data="admin_promo_list")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
+    ])
+    await cq.message.edit_text("🎟 <b>Промокоды</b>", reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(lambda cq: cq.data == "admin_promo_list")
+async def cb_admin_promo_list(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    active_lines = []
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    for code, promo in promos_db.items():
+        if not isinstance(promo, dict):
+            continue
+        if promo.get("active") is False:
+            continue
+        expires_at = promo.get("expires_at")
+        if expires_at and int(expires_at) <= now_ts:
+            continue
+        percent = promo.get("percent")
+        plans = promo.get("plans")
+        if plans == "*" or (isinstance(plans, list) and "*" in plans):
+            plans_text = "все тарифы"
+        elif isinstance(plans, list):
+            plans_text = ", ".join(plans)
+        else:
+            plans_text = "—"
+
+        if expires_at:
+            exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+            exp_text = exp_dt.strftime("%d.%m.%Y")
+        else:
+            exp_text = "без срока"
+
+        active_lines.append(f"• <code>{code}</code> — {percent}% ({plans_text}), до {exp_text}")
+
+    text = "🎟 <b>Активные промокоды:</b>\n\n"
+    if active_lines:
+        text += "\n".join(active_lines)
+    else:
+        text += "Пока нет активных промокодов."
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_promo_create")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_promos")],
+    ])
+    await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(lambda cq: cq.data == "admin_promo_create")
+async def cb_admin_promo_create(cq: types.CallbackQuery, state: FSMContext):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    await state.clear()
+    await state.set_state(AdminPromoStates.waiting_for_code)
+    await cq.message.edit_text(
+        "➕ <b>Создание промокода</b>\n\n"
+        "1) Введите промокод (например: <code>NEWYEAR</code>)\n"
+        "• Лучше без пробелов\n",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_promos")]
+        ])
+    )
+
+
+@dp.message(AdminPromoStates.waiting_for_code)
+async def admin_promo_code(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+
+    code = normalize_promo_code(m.text)
+    if not code or len(code) < 3:
+        await m.answer("❌ Введите промокод минимум из 3 символов.")
+        return
+
+    await state.update_data(code=code)
+    await state.set_state(AdminPromoStates.waiting_for_percent)
+    await m.answer(
+        f"2) Введите скидку в процентах для <code>{code}</code> (1-99)",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(AdminPromoStates.waiting_for_percent)
+async def admin_promo_percent(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+
+    try:
+        percent = int(m.text)
+        if percent <= 0 or percent >= 100:
+            raise ValueError
+    except Exception:
+        await m.answer("❌ Введите число от 1 до 99.")
+        return
+
+    await state.update_data(percent=percent)
+    await state.set_state(AdminPromoStates.waiting_for_plans)
+    await m.answer(
+        "3) На какие тарифы действует?\n\n"
+        "• Напишите <code>all</code> — на все\n"
+        "• Или список ключей через запятую: <code>m1,m3,m6,y1</code>",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(AdminPromoStates.waiting_for_plans)
+async def admin_promo_plans(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+
+    raw = (m.text or "").strip().lower()
+    if raw in ("all", "*", "все"):
+        plans = ["*"]
+    else:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        unknown = [p for p in parts if p not in PLANS]
+        if unknown:
+            await m.answer(f"❌ Неизвестные планы: {', '.join(unknown)}. Доступно: {', '.join(PLANS.keys())}")
+            return
+        if not parts:
+            await m.answer("❌ Введите 'all' или список планов через запятую.")
+            return
+        plans = parts
+
+    await state.update_data(plans=plans)
+    await state.set_state(AdminPromoStates.waiting_for_days)
+    await m.answer("4) Срок жизни в днях (например: <code>7</code>)", parse_mode="HTML")
+
+
+@dp.message(AdminPromoStates.waiting_for_days)
+async def admin_promo_days(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+
+    try:
+        days = int(m.text)
+        if days <= 0:
+            raise ValueError
+    except Exception:
+        await m.answer("❌ Введите количество дней (целое число > 0).")
+        return
+
+    data = await state.get_data()
+    code = data.get("code")
+    percent = data.get("percent")
+    plans = data.get("plans")
+
+    expires_at = int((datetime.now(timezone.utc) + timedelta(days=days)).timestamp())
+    promos_db[code] = {
+        "percent": int(percent),
+        "plans": plans,
+        "expires_at": expires_at,
+        "active": True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": m.from_user.id,
+    }
+    save_promos_db(promos_db)
+
+    exp_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+    await m.answer(
+        f"✅ Промокод <code>{code}</code> создан: -{percent}% до {exp_dt.strftime('%d.%m.%Y')}",
+        parse_mode="HTML"
+    )
+
+    await state.clear()
 
 @dp.callback_query(lambda cq: cq.data == "admin_prices")
 async def cb_admin_prices(cq: types.CallbackQuery):
@@ -491,11 +763,28 @@ async def cb_cabinet(cq: types.CallbackQuery):
 @dp.callback_query(lambda cq: cq.data == "buy_menu")
 async def cb_buy_menu(cq: types.CallbackQuery):
     """Show buy menu"""
+    tg_user = cq.from_user
+    mb_username = build_marzban_username(tg_user)
+    pending_code = get_user_pending_promo_code(mb_username)
+    promo_line = "🎟 <b>Промокод:</b> не задан"
+    if pending_code:
+        promo = get_valid_promo(pending_code)
+        if promo:
+            expires_at = promo.get("expires_at")
+            exp_txt = ""
+            if expires_at:
+                exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+                exp_txt = f" (до {exp_dt.strftime('%d.%m.%Y')})"
+            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (-{promo['percent']}%){exp_txt}"
+        else:
+            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (недействителен)"
+
     text = (
         "💎 <b>Выберите тарифный план:</b>\n\n"
         "⚡️ Высокая скорость\n"
         "🌍 Локации по всему миру\n"
-        "♾ Безлимитный трафик\n"
+        "♾ Безлимитный трафик\n\n"
+        f"{promo_line}"
     )
     try:
         await cq.message.edit_text(text, reply_markup=get_buy_keyboard(), parse_mode="HTML")
@@ -505,6 +794,74 @@ async def cb_buy_menu(cq: types.CallbackQuery):
         await cq.answer()
     else:
         await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("promo_enter:"))
+async def cb_promo_enter(cq: types.CallbackQuery, state: FSMContext):
+    scope = cq.data.split(":", 1)[1]
+    await state.clear()
+    await state.update_data(promo_scope=scope)
+    await state.set_state(PromoUserStates.waiting_for_code)
+    await cq.message.edit_text(
+        "🎟 <b>Введите промокод</b>\n\n"
+        "Отправьте промокод одним сообщением.",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="buy_menu" if scope == "buy" else "renew_menu")]
+        ])
+    )
+    await cq.answer()
+
+
+@dp.message(PromoUserStates.waiting_for_code)
+async def promo_user_entered(m: Message, state: FSMContext):
+    tg_user = m.from_user
+    mb_username = build_marzban_username(tg_user)
+    code = normalize_promo_code(m.text)
+
+    data = await state.get_data()
+    scope = data.get("promo_scope")
+
+    promo = get_valid_promo(code)
+    if not promo:
+        await m.answer("❌ Промокод недействителен или истёк.")
+        return
+
+    used = get_user_used_promos(mb_username)
+    if code in used:
+        await m.answer("❌ Этот промокод уже использован на вашем аккаунте.")
+        return
+
+    users_db.setdefault(mb_username, {})
+    users_db[mb_username]["pending_promo"] = code
+    users_db[mb_username]["pending_promo_set_at"] = datetime.now(timezone.utc).isoformat()
+    save_users_db(users_db)
+
+    expires_at = promo.get("expires_at")
+    exp_txt = ""
+    if expires_at:
+        exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+        exp_txt = f" (до {exp_dt.strftime('%d.%m.%Y')})"
+
+    await state.clear()
+    await m.answer(
+        f"✅ Промокод <code>{code}</code> применён: -{promo['percent']}%{exp_txt}\n"
+        f"Скидка будет учтена при оплате подходящего тарифа.",
+        parse_mode="HTML"
+    )
+
+    if scope == "renew":
+        text = f"🔄 <b>Продление подписки:</b>\n\nВыберите срок продления:\n\n🎟 <b>Промокод:</b> <code>{code}</code> (-{promo['percent']}%){exp_txt}"
+        await m.answer(text, reply_markup=get_renew_keyboard(), parse_mode="HTML")
+    else:
+        text = (
+            "💎 <b>Выберите тарифный план:</b>\n\n"
+            "⚡️ Высокая скорость\n"
+            "🌍 Локации по всему миру\n"
+            "♾ Безлимитный трафик\n\n"
+            f"🎟 <b>Промокод:</b> <code>{code}</code> (-{promo['percent']}%){exp_txt}"
+        )
+        await m.answer(text, reply_markup=get_buy_keyboard(), parse_mode="HTML")
 
 @dp.callback_query(lambda cq: cq.data == "trial_subs")
 async def cb_trial_subs(cq: types.CallbackQuery):
@@ -628,7 +985,23 @@ async def cb_get_link(cq: types.CallbackQuery):
 @dp.callback_query(lambda cq: cq.data == "renew_menu")
 async def cb_renew_menu(cq: types.CallbackQuery):
     """Show renewal plans menu"""
-    text = "🔄 <b>Продление подписки:</b>\n\nВыберите срок продления:"
+    tg_user = cq.from_user
+    mb_username = build_marzban_username(tg_user)
+    pending_code = get_user_pending_promo_code(mb_username)
+    promo_line = "🎟 <b>Промокод:</b> не задан"
+    if pending_code:
+        promo = get_valid_promo(pending_code)
+        if promo:
+            expires_at = promo.get("expires_at")
+            exp_txt = ""
+            if expires_at:
+                exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+                exp_txt = f" (до {exp_dt.strftime('%d.%m.%Y')})"
+            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (-{promo['percent']}%){exp_txt}"
+        else:
+            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (недействителен)"
+
+    text = f"🔄 <b>Продление подписки:</b>\n\nВыберите срок продления:\n\n{promo_line}"
     try:
         await cq.message.edit_text(text, reply_markup=get_renew_keyboard(), parse_mode="HTML")
     except Exception as e:
@@ -645,6 +1018,7 @@ def get_renew_keyboard():
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['m3']['title']} — {PLANS['m3']['price']} ⭐️ (~{PLANS['m3']['price_rub']}₽)", callback_data="renew:m3")],
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['m6']['title']} — {PLANS['m6']['price']} ⭐️ (~{PLANS['m6']['price_rub']}₽)", callback_data="renew:m6")],
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['y1']['title']} — {PLANS['y1']['price']} ⭐️ (~{PLANS['y1']['price_rub']}₽)", callback_data="renew:y1")],
+        [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:renew")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_cabinet")],
     ])
     return kb
@@ -690,14 +1064,33 @@ async def cb_renew(cq: types.CallbackQuery):
     except Exception as e:
         logging.warning(f"Could not delete message: {e}")
     
-    # Create invoice (Stars)
-    prices = [LabeledPrice(label=plan["title"], amount=plan["price"])]
+    # Create invoice (Stars) with optional promo discount
+    tg_user = cq.from_user
+    mb_username = build_marzban_username(tg_user)
+    base_price = int(plan["price"])
+    final_price = base_price
+    applied_promo = None
+
+    pending_code = get_user_pending_promo_code(mb_username)
+    if pending_code:
+        promo = get_valid_promo(pending_code)
+        if promo and promo_applies_to_plan(promo, plan_key) and pending_code not in get_user_used_promos(mb_username):
+            percent = int(promo["percent"])
+            discounted = (base_price * (100 - percent)) // 100
+            final_price = max(1, int(discounted))
+            applied_promo = pending_code
+
+    prices = [LabeledPrice(label=plan["title"], amount=final_price)]
     
     await bot.send_invoice(
         chat_id=cq.from_user.id,
         title=f"Продление: {plan['title']}",
-        description=f"Продление подписки на {plan['title']} — {plan['price']} ⭐",
-        payload=f"renew:{plan_key}:{cq.from_user.id}",
+        description=(
+            f"Продление подписки на {plan['title']}"
+            + (f"\nПромокод {applied_promo}: -{get_valid_promo(applied_promo)['percent']}%" if applied_promo else "")
+            + (f"\nИтого: {final_price} ⭐ (было {base_price} ⭐)" if applied_promo else f"\nИтого: {base_price} ⭐")
+        ),
+        payload=f"renew:{plan_key}:{cq.from_user.id}:{applied_promo}" if applied_promo else f"renew:{plan_key}:{cq.from_user.id}",
         provider_token="",
         start_parameter=f"renew_{plan_key}",
         currency="XTR",
@@ -720,14 +1113,33 @@ async def cb_buy(cq: types.CallbackQuery):
     except Exception as e:
         logging.warning(f"Could not delete message: {e}")
     
-    # Create invoice (Stars)
-    prices = [LabeledPrice(label=plan["title"], amount=plan["price"])]
+    # Create invoice (Stars) with optional promo discount
+    tg_user = cq.from_user
+    mb_username = build_marzban_username(tg_user)
+    base_price = int(plan["price"])
+    final_price = base_price
+    applied_promo = None
+
+    pending_code = get_user_pending_promo_code(mb_username)
+    if pending_code:
+        promo = get_valid_promo(pending_code)
+        if promo and promo_applies_to_plan(promo, plan_key) and pending_code not in get_user_used_promos(mb_username):
+            percent = int(promo["percent"])
+            discounted = (base_price * (100 - percent)) // 100
+            final_price = max(1, int(discounted))
+            applied_promo = pending_code
+
+    prices = [LabeledPrice(label=plan["title"], amount=final_price)]
     
     await bot.send_invoice(
         chat_id=cq.from_user.id,
         title=f"{plan['title']} на {plan['days']} дней",
-        description=f"Подписка {plan['title']} — {plan['price']} ⭐",
-        payload=f"purchase:{plan_key}:{cq.from_user.id}",
+        description=(
+            f"Подписка {plan['title']}"
+            + (f"\nПромокод {applied_promo}: -{get_valid_promo(applied_promo)['percent']}%" if applied_promo else "")
+            + (f"\nИтого: {final_price} ⭐ (было {base_price} ⭐)" if applied_promo else f"\nИтого: {base_price} ⭐")
+        ),
+        payload=f"purchase:{plan_key}:{cq.from_user.id}:{applied_promo}" if applied_promo else f"purchase:{plan_key}:{cq.from_user.id}",
         provider_token="",
         start_parameter=f"buy_{plan_key}",
         currency="XTR",
@@ -751,10 +1163,15 @@ async def on_success(m: Message):
     # payload: we set earlier payload to "purchase:plan:userid" or "renew:plan:userid"
     payload = sp.invoice_payload
     try:
-        payment_type, plan_key, buyer_id_str = payload.split(":")
+        parts = payload.split(":")
+        payment_type = parts[0]
+        plan_key = parts[1] if len(parts) > 1 else None
+        buyer_id_str = parts[2] if len(parts) > 2 else None
+        applied_promo = normalize_promo_code(parts[3]) if len(parts) > 3 and parts[3] else None
     except Exception:
         payment_type = "purchase"
         plan_key = None
+        applied_promo = None
     plan = PLANS.get(plan_key) if plan_key else None
 
     # Build marzban username
@@ -800,6 +1217,26 @@ async def on_success(m: Message):
         text = f"❌ Оплата принята, но не удалось {'продлить' if payment_type == 'renew' else 'создать'} подписку. Администратор уведомлён."
         await m.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
         return
+
+    # Mark promo as used (one time per account)
+    if applied_promo and plan_key:
+        promo = get_valid_promo(applied_promo)
+        if promo and promo_applies_to_plan(promo, plan_key):
+            users_db.setdefault(mb_username, {})
+            used = users_db[mb_username].get("used_promos")
+            if not isinstance(used, list):
+                used = []
+            normalized_used = [normalize_promo_code(x) for x in used if isinstance(x, str)]
+            if applied_promo not in normalized_used:
+                used.append(applied_promo)
+            users_db[mb_username]["used_promos"] = used
+
+            # Clear pending promo if it matches
+            if normalize_promo_code(users_db[mb_username].get("pending_promo")) == applied_promo:
+                users_db[mb_username].pop("pending_promo", None)
+                users_db[mb_username].pop("pending_promo_set_at", None)
+
+            save_users_db(users_db)
     
     # Save or update user to database for notification system
     users_db[mb_username] = {
