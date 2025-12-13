@@ -7,6 +7,8 @@ import json
 from datetime import datetime, timedelta, timezone
 import aiohttp
 from marzpy import Marzban
+from aiogram.dispatcher.middlewares.base import BaseMiddleware
+from aiogram.exceptions import CancelHandler
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import LabeledPrice, Invoice, PreCheckoutQuery, Message
 from aiogram.filters import Command
@@ -24,6 +26,74 @@ USERS_DB_FILE = "users_db.json"
 PLANS_FILE = "plans.json"
 PROMOS_FILE = "promos.json"
 PROMO_USAGE_FILE = "promo_usage.json"
+SETTINGS_FILE = "settings.json"
+
+MAINTENANCE_TEXT = (
+    "Бот временно недоступен. Проводятся технические работы. "
+    "Просим извинения за доставленные неудобства."
+)
+
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            logging.error(f"Error loading settings: {e}")
+    return {"maintenance_mode": False}
+
+
+def save_settings(data: dict):
+    try:
+        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving settings: {e}")
+
+
+settings = load_settings()
+
+
+def is_maintenance_mode() -> bool:
+    return bool(settings.get("maintenance_mode"))
+
+
+def set_maintenance_mode(value: bool):
+    settings["maintenance_mode"] = bool(value)
+    settings["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_settings(settings)
+
+
+def get_admin_keyboard():
+    maintenance_on = is_maintenance_mode()
+    maintenance_text = "🛠 Техработы: ВКЛ" if maintenance_on else "🛠 Техработы: ВЫКЛ"
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="💰 Сменить тарифы", callback_data="admin_prices")],
+        [types.InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin_promos")],
+        [types.InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance")],
+    ])
+    return kb
+
+
+class MaintenanceMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if not is_maintenance_mode():
+            return await handler(event, data)
+
+        user = data.get("event_from_user") or getattr(event, "from_user", None)
+        if user and user.id == ADMIN_ID:
+            return await handler(event, data)
+
+        # Do not block successful payment updates, otherwise subscriptions won't be activated.
+        if isinstance(event, Message) and event.successful_payment is not None:
+            return await handler(event, data)
+
+        if isinstance(event, Message):
+            await event.answer(MAINTENANCE_TEXT)
+        raise CancelHandler()
 
 def load_users_db():
     """Load users database"""
@@ -186,6 +256,9 @@ ssl._create_default_https_context = ssl._create_unverified_context
 # Initialize without session - will create it in async context
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Block non-admin messages during maintenance
+dp.message.middleware(MaintenanceMiddleware())
 
 # Dictionary to track sent notifications (to avoid duplicates)
 # Format: {user_id: {timestamp_threshold: True, ...}}
@@ -473,13 +546,22 @@ def build_marzban_username(tg_user: types.User):
 async def cmd_admin(m: Message):
     if m.from_user.id != ADMIN_ID:
         return
-    
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="💰 Сменить тарифы", callback_data="admin_prices")],
-        [types.InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin_promos")],
-    ])
-    
-    await m.answer("🛠 <b>Админ-панель</b>", reply_markup=kb, parse_mode="HTML")
+
+    await m.answer("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+
+
+@dp.callback_query(lambda cq: cq.data == "admin_toggle_maintenance")
+async def cb_admin_toggle_maintenance(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    set_maintenance_mode(not is_maintenance_mode())
+    try:
+        await cq.message.edit_text("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+    except Exception as e:
+        if "not modified" not in str(e):
+            logging.error(f"Error editing admin panel message: {e}")
+    await cq.answer("✅")
 
 
 @dp.callback_query(lambda cq: cq.data == "admin_promos")
@@ -772,12 +854,8 @@ async def cb_admin_prices(cq: types.CallbackQuery):
 async def cb_admin_back(cq: types.CallbackQuery):
     if cq.from_user.id != ADMIN_ID:
         return
-        
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="💰 Сменить тарифы", callback_data="admin_prices")],
-    ])
-    
-    await cq.message.edit_text("🛠 <b>Админ-панель</b>", reply_markup=kb, parse_mode="HTML")
+
+    await cq.message.edit_text("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
 @dp.callback_query(lambda cq: cq.data.startswith("edit_price:"))
 async def cb_admin_edit_price(cq: types.CallbackQuery, state: FSMContext):
