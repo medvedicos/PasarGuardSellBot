@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 import aiohttp
 from marzpy import Marzban
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
-from aiogram.dispatcher.event.bases import CancelHandler
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import LabeledPrice, Invoice, PreCheckoutQuery, Message
 from aiogram.filters import Command
@@ -93,7 +92,7 @@ class MaintenanceMiddleware(BaseMiddleware):
 
         if isinstance(event, Message):
             await event.answer(MAINTENANCE_TEXT)
-        raise CancelHandler()
+        return
 
 def load_users_db():
     """Load users database"""
