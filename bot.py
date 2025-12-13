@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import aiohttp
 from marzpy import Marzban
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
-from aiogram.exceptions import CancelHandler
+from aiogram.dispatcher.event.bases import CancelHandler
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import LabeledPrice, Invoice, PreCheckoutQuery, Message
 from aiogram.filters import Command
