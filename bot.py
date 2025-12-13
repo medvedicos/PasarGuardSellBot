@@ -9,7 +9,7 @@ import aiohttp
 from marzpy import Marzban
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import LabeledPrice, Invoice, PreCheckoutQuery, Message
+from aiogram.types import LabeledPrice, Invoice, PreCheckoutQuery, Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -90,8 +90,17 @@ class MaintenanceMiddleware(BaseMiddleware):
         if isinstance(event, Message) and event.successful_payment is not None:
             return await handler(event, data)
 
+        # Do not block pre-checkout, otherwise Stars payments won't pass.
+        if isinstance(event, PreCheckoutQuery):
+            return await handler(event, data)
+
         if isinstance(event, Message):
             await event.answer(MAINTENANCE_TEXT)
+            return
+
+        if isinstance(event, CallbackQuery):
+            await event.answer(MAINTENANCE_TEXT, show_alert=True)
+            return
         return
 
 def load_users_db():
@@ -258,6 +267,8 @@ dp = Dispatcher()
 
 # Block non-admin messages during maintenance
 dp.message.middleware(MaintenanceMiddleware())
+dp.callback_query.middleware(MaintenanceMiddleware())
+dp.pre_checkout_query.middleware(MaintenanceMiddleware())
 
 # Dictionary to track sent notifications (to avoid duplicates)
 # Format: {user_id: {timestamp_threshold: True, ...}}
