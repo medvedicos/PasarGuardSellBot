@@ -1337,7 +1337,8 @@ async def cb_renew(cq: types.CallbackQuery):
     prices = [LabeledPrice(label=plan["title"], amount=final_price)]
 
     invoice_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="invoice_back:renew")]
+        [types.InlineKeyboardButton(text="⭐️ Оплатить", pay=True)],
+        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="invoice_back:renew")],
     ])
     
     await bot.send_invoice(
@@ -1391,7 +1392,8 @@ async def cb_buy(cq: types.CallbackQuery):
     prices = [LabeledPrice(label=plan["title"], amount=final_price)]
 
     invoice_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="invoice_back:buy")]
+        [types.InlineKeyboardButton(text="⭐️ Оплатить", pay=True)],
+        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="invoice_back:buy")],
     ])
     
     await bot.send_invoice(
