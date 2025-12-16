@@ -1253,7 +1253,6 @@ def build_buy_menu_text(tg_user: types.User) -> str:
         "⚡️ Высокая скорость\n"
         "🌍 Локации по всему миру\n"
         "♾ Безлимитный трафик\n\n"
-        "⭐️ <b>Ваш баланс звёзд:</b> откройте @PremiumBot\n\n"
         f"{promo_line}"
     )
 
@@ -1277,7 +1276,6 @@ def build_renew_menu_text(tg_user: types.User) -> str:
     return (
         "🔄 <b>Продление подписки:</b>\n\n"
         "Выберите срок продления:\n\n"
-        "⭐️ <b>Ваш баланс звёзд:</b> откройте @PremiumBot\n\n"
         f"{promo_line}"
     )
 
