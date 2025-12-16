@@ -471,6 +471,7 @@ def get_buy_keyboard():
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['m3']['title']} — {PLANS['m3']['price']} ⭐️ (~{PLANS['m3']['price_rub']}₽)", callback_data="buy:m3")],
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['m6']['title']} — {PLANS['m6']['price']} ⭐️ (~{PLANS['m6']['price_rub']}₽)", callback_data="buy:m6")],
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['y1']['title']} — {PLANS['y1']['price']} ⭐️ (~{PLANS['y1']['price_rub']}₽)", callback_data="buy:y1")],
+        [types.InlineKeyboardButton(text="⭐️ Купить звезды", url="https://t.me/PremiumBot")],
         [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:buy")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")],
     ])
@@ -1224,6 +1225,7 @@ def get_renew_keyboard():
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['m3']['title']} — {PLANS['m3']['price']} ⭐️ (~{PLANS['m3']['price_rub']}₽)", callback_data="renew:m3")],
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['m6']['title']} — {PLANS['m6']['price']} ⭐️ (~{PLANS['m6']['price_rub']}₽)", callback_data="renew:m6")],
         [types.InlineKeyboardButton(text=f"🗓 {PLANS['y1']['title']} — {PLANS['y1']['price']} ⭐️ (~{PLANS['y1']['price_rub']}₽)", callback_data="renew:y1")],
+        [types.InlineKeyboardButton(text="⭐️ Купить звезды", url="https://t.me/PremiumBot")],
         [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:renew")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_cabinet")],
     ])
@@ -1251,6 +1253,7 @@ def build_buy_menu_text(tg_user: types.User) -> str:
         "⚡️ Высокая скорость\n"
         "🌍 Локации по всему миру\n"
         "♾ Безлимитный трафик\n\n"
+        "⭐️ <b>Ваш баланс звёзд:</b> откройте @PremiumBot\n\n"
         f"{promo_line}"
     )
 
@@ -1271,7 +1274,12 @@ def build_renew_menu_text(tg_user: types.User) -> str:
         else:
             promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (недействителен)"
 
-    return f"🔄 <b>Продление подписки:</b>\n\nВыберите срок продления:\n\n{promo_line}"
+    return (
+        "🔄 <b>Продление подписки:</b>\n\n"
+        "Выберите срок продления:\n\n"
+        "⭐️ <b>Ваш баланс звёзд:</b> откройте @PremiumBot\n\n"
+        f"{promo_line}"
+    )
 
 @dp.callback_query(lambda cq: cq.data == "back_to_cabinet")
 async def cb_back_to_cabinet(cq: types.CallbackQuery):
