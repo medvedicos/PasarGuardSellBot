@@ -1526,22 +1526,28 @@ async def on_success(m: Message):
     save_users_db(users_db)
     logging.info(f"Updated user {mb_username} (TG ID: {tg_user.id}) in database")
     
-    # Get subscription URL from the API response
+    # Get subscription URL (prefer API response, fallback to template)
     subs_link = res.get("subscription_url")
     if not subs_link:
         subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
-    
+
     logging.info(f"Subscription link: {subs_link}")
-    
-    text = (
-        f"✅ <b>Оплата прошла успешно!</b>\n\n"
+
+    # Fetch fresh user data for a nice cabinet view (fallback to res)
+    fresh_user_data = await marzban_get_user(mb_username)
+    if not fresh_user_data:
+        fresh_user_data = res
+
+    cabinet_text = (
+        "✅ <b>Оплата прошла успешно!</b>\n"
         f"Подписка {action_text}.\n"
         f"📅 <b>Действует до:</b> {expire_dt.strftime('%d.%m.%Y')}\n\n"
-        f"🔗 <b>Ваша ссылка для подключения:</b>\n<code>{subs_link}</code>\n\n"
-        f"👆 <i>Нажмите на ссылку, чтобы скопировать</i>\n"
-        f"💡 Вставьте её в ваше VPN-приложение."
+        "👤 <b>Личный кабинет</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{format_user_info(fresh_user_data)}\n\n"
+        "🌍 <i>Подключение:</i> нажмите кнопку <b>Открыть подписку</b> ниже."
     )
-    await m.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+    await m.answer(cabinet_text, reply_markup=get_cabinet_keyboard(subs_link=subs_link), parse_mode="HTML")
 
 # Logic for checking subscriptions
 async def run_subscription_check():
