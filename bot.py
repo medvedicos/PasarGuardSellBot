@@ -458,7 +458,6 @@ def get_cabinet_keyboard(subs_link: str | None = None):
         rows.append([types.InlineKeyboardButton(text="🌍 Открыть подписку", url=subs_link)])
 
     rows.extend([
-        [types.InlineKeyboardButton(text="🔗 Получить ссылку", callback_data="get_link")],
         [types.InlineKeyboardButton(text="💎 Купить/продлить", callback_data="renew_menu")],
         [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
     ])
