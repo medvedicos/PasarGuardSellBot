@@ -1006,28 +1006,7 @@ async def cb_cabinet(cq: types.CallbackQuery):
 async def cb_buy_menu(cq: types.CallbackQuery):
     """Show buy menu"""
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
-    pending_code = get_user_pending_promo_code(mb_username)
-    promo_line = "🎟 <b>Промокод:</b> не задан"
-    if pending_code:
-        promo = get_valid_promo(pending_code)
-        if promo:
-            expires_at = promo.get("expires_at")
-            exp_txt = ""
-            if expires_at:
-                exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
-                exp_txt = f" (до {exp_dt.strftime('%d.%m.%Y')})"
-            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (-{promo['percent']}%){exp_txt}"
-        else:
-            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (недействителен)"
-
-    text = (
-        "💎 <b>Выберите тарифный план:</b>\n\n"
-        "⚡️ Высокая скорость\n"
-        "🌍 Локации по всему миру\n"
-        "♾ Безлимитный трафик\n\n"
-        f"{promo_line}"
-    )
+    text = build_buy_menu_text(tg_user)
     try:
         await cq.message.edit_text(text, reply_markup=get_buy_keyboard(), parse_mode="HTML")
     except Exception as e:
@@ -1228,22 +1207,7 @@ async def cb_get_link(cq: types.CallbackQuery):
 async def cb_renew_menu(cq: types.CallbackQuery):
     """Show renewal plans menu"""
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
-    pending_code = get_user_pending_promo_code(mb_username)
-    promo_line = "🎟 <b>Промокод:</b> не задан"
-    if pending_code:
-        promo = get_valid_promo(pending_code)
-        if promo:
-            expires_at = promo.get("expires_at")
-            exp_txt = ""
-            if expires_at:
-                exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
-                exp_txt = f" (до {exp_dt.strftime('%d.%m.%Y')})"
-            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (-{promo['percent']}%){exp_txt}"
-        else:
-            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (недействителен)"
-
-    text = f"🔄 <b>Продление подписки:</b>\n\nВыберите срок продления:\n\n{promo_line}"
+    text = build_renew_menu_text(tg_user)
     try:
         await cq.message.edit_text(text, reply_markup=get_renew_keyboard(), parse_mode="HTML")
     except Exception as e:
@@ -1264,6 +1228,50 @@ def get_renew_keyboard():
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_cabinet")],
     ])
     return kb
+
+
+def build_buy_menu_text(tg_user: types.User) -> str:
+    mb_username = build_marzban_username(tg_user)
+    pending_code = get_user_pending_promo_code(mb_username)
+    promo_line = "🎟 <b>Промокод:</b> не задан"
+    if pending_code:
+        promo = get_valid_promo(pending_code)
+        if promo:
+            expires_at = promo.get("expires_at")
+            exp_txt = ""
+            if expires_at:
+                exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+                exp_txt = f" (до {exp_dt.strftime('%d.%m.%Y')})"
+            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (-{promo['percent']}%){exp_txt}"
+        else:
+            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (недействителен)"
+
+    return (
+        "💎 <b>Выберите тарифный план:</b>\n\n"
+        "⚡️ Высокая скорость\n"
+        "🌍 Локации по всему миру\n"
+        "♾ Безлимитный трафик\n\n"
+        f"{promo_line}"
+    )
+
+
+def build_renew_menu_text(tg_user: types.User) -> str:
+    mb_username = build_marzban_username(tg_user)
+    pending_code = get_user_pending_promo_code(mb_username)
+    promo_line = "🎟 <b>Промокод:</b> не задан"
+    if pending_code:
+        promo = get_valid_promo(pending_code)
+        if promo:
+            expires_at = promo.get("expires_at")
+            exp_txt = ""
+            if expires_at:
+                exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+                exp_txt = f" (до {exp_dt.strftime('%d.%m.%Y')})"
+            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (-{promo['percent']}%){exp_txt}"
+        else:
+            promo_line = f"🎟 <b>Промокод:</b> <code>{pending_code}</code> (недействителен)"
+
+    return f"🔄 <b>Продление подписки:</b>\n\nВыберите срок продления:\n\n{promo_line}"
 
 @dp.callback_query(lambda cq: cq.data == "back_to_cabinet")
 async def cb_back_to_cabinet(cq: types.CallbackQuery):
@@ -1327,6 +1335,10 @@ async def cb_renew(cq: types.CallbackQuery):
             applied_promo = pending_code
 
     prices = [LabeledPrice(label=plan["title"], amount=final_price)]
+
+    invoice_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="invoice_back:renew")]
+    ])
     
     await bot.send_invoice(
         chat_id=cq.from_user.id,
@@ -1341,6 +1353,7 @@ async def cb_renew(cq: types.CallbackQuery):
         start_parameter=f"renew_{plan_key}",
         currency="XTR",
         prices=prices,
+        reply_markup=invoice_kb,
     )
     await cq.answer()
 
@@ -1376,6 +1389,10 @@ async def cb_buy(cq: types.CallbackQuery):
             applied_promo = pending_code
 
     prices = [LabeledPrice(label=plan["title"], amount=final_price)]
+
+    invoice_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="invoice_back:buy")]
+    ])
     
     await bot.send_invoice(
         chat_id=cq.from_user.id,
@@ -1390,7 +1407,27 @@ async def cb_buy(cq: types.CallbackQuery):
         start_parameter=f"buy_{plan_key}",
         currency="XTR",
         prices=prices,
+        reply_markup=invoice_kb,
     )
+    await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("invoice_back:"))
+async def cb_invoice_back(cq: types.CallbackQuery):
+    scope = cq.data.split(":", 1)[1]
+    # Best-effort delete invoice message
+    try:
+        await cq.message.delete()
+    except Exception as e:
+        logging.warning(f"Could not delete invoice message: {e}")
+
+    if scope == "renew":
+        text = build_renew_menu_text(cq.from_user)
+        await bot.send_message(cq.from_user.id, text, reply_markup=get_renew_keyboard(), parse_mode="HTML")
+    else:
+        text = build_buy_menu_text(cq.from_user)
+        await bot.send_message(cq.from_user.id, text, reply_markup=get_buy_keyboard(), parse_mode="HTML")
+
     await cq.answer()
 
 # handle pre_checkout (confirm invoice)
