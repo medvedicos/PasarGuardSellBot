@@ -444,7 +444,7 @@ def format_user_info(user_data: dict) -> str:
 # Create main menu keyboard
 def get_main_keyboard():
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="👤 Мой профиль", callback_data="cabinet")],
+        [types.InlineKeyboardButton(text="👤 Личный кабинет", callback_data="cabinet")],
         [types.InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy_menu")],
         [types.InlineKeyboardButton(text="🎁 Пробный период (3 дня)", callback_data="trial_subs")],
         [types.InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/Mizuvil")],
@@ -973,12 +973,18 @@ async def cb_cabinet(cq: types.CallbackQuery):
     subs_link = None
     if user_data is None:
         text = (
-            "👤 <b>Мой профиль</b>\n\n"
-            "❌ <b>Нет активной подписки</b>\n"
-            "Оформите подписку, чтобы получить доступ к VPN."
+            "👤 <b>Личный кабинет</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n\n"
+            "❌ <b>Подписка не активна</b>\n\n"
+            "Чтобы получить доступ к VPN, оформите подписку или используйте пробный период."
         )
     else:
-        text = f"👤 <b>Мой профиль</b>\n\n{format_user_info(user_data)}"
+        text = (
+            "👤 <b>Личный кабинет</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{format_user_info(user_data)}\n\n"
+            "🌍 <i>Подключение:</i> нажмите кнопку <b>Открыть подписку</b> ниже."
+        )
         subs_link = user_data.get("subscription_url")
         if not subs_link:
             subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
