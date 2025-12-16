@@ -452,13 +452,18 @@ def get_main_keyboard():
     return kb
 
 # Create cabinet keyboard
-def get_cabinet_keyboard():
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🔗 Подключить (Ссылка)", callback_data="get_link")],
-        [types.InlineKeyboardButton(text="🔄 Продлить", callback_data="renew_menu")],
+def get_cabinet_keyboard(subs_link: str | None = None):
+    rows = []
+    if subs_link:
+        rows.append([types.InlineKeyboardButton(text="🌍 Открыть подписку", url=subs_link)])
+
+    rows.extend([
+        [types.InlineKeyboardButton(text="🔗 Получить ссылку", callback_data="get_link")],
+        [types.InlineKeyboardButton(text="💎 Купить/продлить", callback_data="renew_menu")],
         [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
     ])
-    return kb
+
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 # Create buy menu keyboard
 def get_buy_keyboard():
@@ -966,6 +971,7 @@ async def cb_cabinet(cq: types.CallbackQuery):
     # Get user info from Marzban
     user_data = await marzban_get_user(mb_username)
     
+    subs_link = None
     if user_data is None:
         text = (
             "👤 <b>Мой профиль</b>\n\n"
@@ -974,10 +980,13 @@ async def cb_cabinet(cq: types.CallbackQuery):
         )
     else:
         text = f"👤 <b>Мой профиль</b>\n\n{format_user_info(user_data)}"
+        subs_link = user_data.get("subscription_url")
+        if not subs_link:
+            subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
     
     # Edit previous message instead of sending new one
     try:
-        await cq.message.edit_text(text, reply_markup=get_cabinet_keyboard(), parse_mode="HTML")
+        await cq.message.edit_text(text, reply_markup=get_cabinet_keyboard(subs_link=subs_link), parse_mode="HTML")
     except Exception as e:
         if "not modified" in str(e):
             # Message is the same, just answer with notification
@@ -1186,7 +1195,7 @@ async def cb_get_link(cq: types.CallbackQuery):
             "У вас нет активной подписки. Купите подписку, чтобы начать использовать VPN."
         )
         try:
-            await cq.message.edit_text(text, reply_markup=get_cabinet_keyboard(), parse_mode="HTML")
+            await cq.message.edit_text(text, reply_markup=get_cabinet_keyboard(subs_link=None), parse_mode="HTML")
         except Exception as e:
             logging.warning(f"Could not edit message: {e}")
             await cq.answer("❌ Подписка не найдена", show_alert=True)
@@ -1203,7 +1212,7 @@ async def cb_get_link(cq: types.CallbackQuery):
             f"💡 Вставьте эту ссылку в ваше VPN-приложение (V2Ray, Hiddify, Streisand и др.)"
         )
         try:
-            await cq.message.edit_text(text, reply_markup=get_cabinet_keyboard(), parse_mode="HTML")
+            await cq.message.edit_text(text, reply_markup=get_cabinet_keyboard(subs_link=subs_link), parse_mode="HTML")
         except Exception as e:
             logging.warning(f"Could not edit message: {e}")
             await cq.answer(subs_link, show_alert=False)
@@ -1259,6 +1268,7 @@ async def cb_back_to_cabinet(cq: types.CallbackQuery):
     
     user_data = await marzban_get_user(mb_username)
     
+    subs_link = None
     if user_data is None:
         text = (
             "👤 <b>Мой профиль</b>\n\n"
@@ -1267,9 +1277,12 @@ async def cb_back_to_cabinet(cq: types.CallbackQuery):
         )
     else:
         text = f"👤 <b>Мой профиль</b>\n\n{format_user_info(user_data)}"
+        subs_link = user_data.get("subscription_url")
+        if not subs_link:
+            subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
     
     try:
-        await cq.message.edit_text(text, reply_markup=get_cabinet_keyboard(), parse_mode="HTML")
+        await cq.message.edit_text(text, reply_markup=get_cabinet_keyboard(subs_link=subs_link), parse_mode="HTML")
     except Exception as e:
         if "not modified" not in str(e):
             logging.error(f"Error editing message: {e}")
