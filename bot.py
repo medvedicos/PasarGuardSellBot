@@ -935,10 +935,7 @@ async def process_new_price(m: Message, state: FSMContext):
         await m.answer(f"✅ Цена для тарифа <b>{PLANS[plan_key]['title']}</b> изменена на {new_price} ⭐️", parse_mode="HTML")
         
         # Show admin menu again
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="💰 Сменить тарифы", callback_data="admin_prices")],
-        ])
-        await m.answer("🛠 <b>Админ-панель</b>", reply_markup=kb, parse_mode="HTML")
+        await m.answer("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
     else:
         await m.answer("❌ Ошибка: тариф не найден.")
         
