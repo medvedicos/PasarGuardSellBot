@@ -4,6 +4,7 @@ import logging
 import asyncio
 import uuid
 import json
+import re
 from datetime import datetime, timedelta, timezone
 import aiohttp
 from marzpy import Marzban
@@ -43,10 +44,12 @@ def load_settings():
                         data["maintenance_mode"] = False
                     if "star_rub_rate" not in data:
                         data["star_rub_rate"] = None
+                    if "star_buy_url" not in data:
+                        data["star_buy_url"] = "https://t.me/PremiumBot"
                     return data
         except Exception as e:
             logging.error(f"Error loading settings: {e}")
-    return {"maintenance_mode": False, "star_rub_rate": None}
+    return {"maintenance_mode": False, "star_rub_rate": None, "star_buy_url": "https://t.me/PremiumBot"}
 
 
 def save_settings(data: dict):
@@ -100,6 +103,53 @@ def calc_price_rub_from_stars(stars: int) -> int | None:
     if stars_int < 0:
         return None
     return int(round(stars_int * rate))
+
+
+def get_star_buy_url() -> str:
+    url = settings.get("star_buy_url")
+    if not isinstance(url, str) or not url.strip():
+        return "https://t.me/PremiumBot"
+    return url.strip()
+
+
+def set_star_buy_url(url: str):
+    settings["star_buy_url"] = (url or "").strip()
+    settings["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_settings(settings)
+
+
+def extract_tg_username(value: str) -> str | None:
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+
+    # Accept:
+    # - @username
+    # - username
+    # - https://t.me/username (with optional params)
+    # - t.me/username
+    s = re.sub(r"^https?://", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^(?:www\.)?", "", s, flags=re.IGNORECASE)
+
+    if s.lower().startswith("t.me/"):
+        s = s[5:]
+    elif s.lower().startswith("telegram.me/"):
+        s = s[12:]
+
+    s = s.strip()
+    if s.startswith("@"):
+        s = s[1:]
+
+    # take the first path segment
+    s = s.split("/", 1)[0]
+    s = s.split("?", 1)[0]
+    s = s.strip()
+
+    if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", s):
+        return None
+    return s
 
 
 def format_plan_price_text(plan_key: str) -> str:
@@ -405,6 +455,7 @@ PLANS = load_plans()
 class AdminStates(StatesGroup):
     waiting_for_price = State()
     waiting_for_rate = State()
+    waiting_for_star_buy_bot = State()
 
 
 class AdminPromoStates(StatesGroup):
@@ -519,7 +570,7 @@ def get_buy_keyboard():
         [types.InlineKeyboardButton(text=format_plan_price_text("m3"), callback_data="buy:m3")],
         [types.InlineKeyboardButton(text=format_plan_price_text("m6"), callback_data="buy:m6")],
         [types.InlineKeyboardButton(text=format_plan_price_text("y1"), callback_data="buy:y1")],
-        [types.InlineKeyboardButton(text="⭐️ Купить звезды", url="https://t.me/PremiumBot")],
+        [types.InlineKeyboardButton(text="⭐️ Купить звезды", url=get_star_buy_url())],
         [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:buy")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")],
     ])
@@ -918,8 +969,13 @@ async def cb_admin_prices(cq: types.CallbackQuery):
     rate = get_star_rub_rate()
     rate_text = f"{rate:g} ₽/⭐️" if isinstance(rate, (int, float)) else "не задан"
 
+    star_buy_url = get_star_buy_url()
+    star_buy_username = extract_tg_username(star_buy_url) or extract_tg_username(star_buy_url.replace("https://", ""))
+    star_buy_text = f"@{star_buy_username}" if star_buy_username else star_buy_url
+
     buttons = []
     buttons.append([types.InlineKeyboardButton(text=f"💱 Курс ₽/⭐️: {rate_text}", callback_data="admin_edit_rate")])
+    buttons.append([types.InlineKeyboardButton(text=f"⭐️ Бот покупки звёзд: {star_buy_text}", callback_data="admin_edit_star_buy_bot")])
     for key, plan in PLANS.items():
         buttons.append([types.InlineKeyboardButton(
             text=f"{plan['title']} — {plan['price']} ⭐️", 
@@ -935,6 +991,29 @@ async def cb_admin_prices(cq: types.CallbackQuery):
         reply_markup=kb,
         parse_mode="HTML",
     )
+
+
+@dp.callback_query(lambda cq: cq.data == "admin_edit_star_buy_bot")
+async def cb_admin_edit_star_buy_bot(cq: types.CallbackQuery, state: FSMContext):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    current_url = get_star_buy_url()
+    current_username = extract_tg_username(current_url) or ""
+    current_display = f"@{current_username}" if current_username else current_url
+
+    await state.clear()
+    await state.set_state(AdminStates.waiting_for_star_buy_bot)
+    await cq.message.edit_text(
+        "⭐️ <b>Бот для покупки звёзд</b>\n\n"
+        f"Текущий: <b>{current_display}</b>\n\n"
+        "Отправьте username (например <code>@PremiumBot</code>) или ссылку (например <code>https://t.me/PremiumBot</code>).",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel_edit")]
+        ]),
+    )
+    await cq.answer()
 
 
 @dp.callback_query(lambda cq: cq.data == "admin_edit_rate")
@@ -1053,6 +1132,26 @@ async def process_new_rate(m: Message, state: FSMContext):
     save_plans(PLANS)
 
     await m.answer(f"✅ Курс установлен: <b>{rate:g}</b> ₽ за 1 ⭐️", parse_mode="HTML")
+    await m.answer("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+    await state.clear()
+
+
+@dp.message(AdminStates.waiting_for_star_buy_bot)
+async def process_new_star_buy_bot(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+
+    username = extract_tg_username(m.text or "")
+    if not username:
+        await m.answer(
+            "❌ Не удалось распознать username.\n\n"
+            "Пример: <code>@PremiumBot</code> или <code>https://t.me/PremiumBot</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    set_star_buy_url(f"https://t.me/{username}")
+    await m.answer(f"✅ Бот для покупки звёзд установлен: <b>@{username}</b>", parse_mode="HTML")
     await m.answer("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
     await state.clear()
 
@@ -1335,7 +1434,7 @@ def get_renew_keyboard():
         [types.InlineKeyboardButton(text=format_plan_price_text("m3"), callback_data="renew:m3")],
         [types.InlineKeyboardButton(text=format_plan_price_text("m6"), callback_data="renew:m6")],
         [types.InlineKeyboardButton(text=format_plan_price_text("y1"), callback_data="renew:y1")],
-        [types.InlineKeyboardButton(text="⭐️ Купить звезды", url="https://t.me/PremiumBot")],
+        [types.InlineKeyboardButton(text="⭐️ Купить звезды", url=get_star_buy_url())],
         [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:renew")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_cabinet")],
     ])
