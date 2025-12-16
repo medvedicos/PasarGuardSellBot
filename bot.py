@@ -194,12 +194,14 @@ def format_plan_price_text(plan_key: str, tg_user: types.User | None = None) -> 
             rub = max(1, (base_rub_int * (100 - percent)) // 100)
         else:
             rub = None
+        discount_part = f" (-{percent}%)"
     else:
         stars = base_stars
         rub = base_rub if isinstance(base_rub, (int, float)) else None
+        discount_part = ""
 
     rub_part = f" (~{int(rub)}₽)" if isinstance(rub, (int, float)) else ""
-    return f"🗓 {title} — {stars} ⭐️{rub_part}"
+    return f"🗓 {title} — {stars} ⭐️{rub_part}{discount_part}"
 
 
 def get_admin_keyboard():
