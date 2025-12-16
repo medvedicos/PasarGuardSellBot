@@ -105,6 +105,27 @@ def calc_price_rub_from_stars(stars: int) -> int | None:
     return int(round(stars_int * rate))
 
 
+def get_discount_percent_for_plan(tg_user: types.User | None, plan_key: str) -> int | None:
+    if tg_user is None:
+        return None
+    mb_username = build_marzban_username(tg_user)
+    pending_code = get_user_pending_promo_code(mb_username)
+    if not pending_code:
+        return None
+    promo = get_valid_promo(pending_code)
+    if not promo or not promo_applies_to_plan(promo, plan_key):
+        return None
+    if pending_code in get_used_promos_for_tg_id(tg_user.id):
+        return None
+    try:
+        percent = int(promo.get("percent"))
+    except Exception:
+        return None
+    if percent <= 0 or percent >= 100:
+        return None
+    return percent
+
+
 def get_star_buy_url() -> str:
     url = settings.get("star_buy_url")
     if not isinstance(url, str) or not url.strip():
@@ -152,14 +173,32 @@ def extract_tg_username(value: str) -> str | None:
     return s
 
 
-def format_plan_price_text(plan_key: str) -> str:
+def format_plan_price_text(plan_key: str, tg_user: types.User | None = None) -> str:
     plan = PLANS.get(plan_key, {})
     title = plan.get("title", plan_key)
-    stars = plan.get("price")
-    rub = calc_price_rub_from_stars(stars)
-    if rub is None:
-        rub = plan.get("price_rub")
-    rub_part = f" (~{rub}₽)" if isinstance(rub, (int, float)) else ""
+    try:
+        base_stars = int(plan.get("price"))
+    except Exception:
+        base_stars = 0
+
+    base_rub = calc_price_rub_from_stars(base_stars)
+    if base_rub is None:
+        base_rub = plan.get("price_rub")
+
+    percent = get_discount_percent_for_plan(tg_user, plan_key)
+    if percent:
+        discounted_stars = max(1, (base_stars * (100 - percent)) // 100)
+        stars = discounted_stars
+        if isinstance(base_rub, (int, float)):
+            base_rub_int = int(base_rub)
+            rub = max(1, (base_rub_int * (100 - percent)) // 100)
+        else:
+            rub = None
+    else:
+        stars = base_stars
+        rub = base_rub if isinstance(base_rub, (int, float)) else None
+
+    rub_part = f" (~{int(rub)}₽)" if isinstance(rub, (int, float)) else ""
     return f"🗓 {title} — {stars} ⭐️{rub_part}"
 
 
@@ -564,12 +603,12 @@ def get_cabinet_keyboard(subs_link: str | None = None):
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 # Create buy menu keyboard
-def get_buy_keyboard():
+def get_buy_keyboard(tg_user: types.User | None = None):
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text=format_plan_price_text("m1"), callback_data="buy:m1")],
-        [types.InlineKeyboardButton(text=format_plan_price_text("m3"), callback_data="buy:m3")],
-        [types.InlineKeyboardButton(text=format_plan_price_text("m6"), callback_data="buy:m6")],
-        [types.InlineKeyboardButton(text=format_plan_price_text("y1"), callback_data="buy:y1")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m1", tg_user=tg_user), callback_data="buy:m1")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m3", tg_user=tg_user), callback_data="buy:m3")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m6", tg_user=tg_user), callback_data="buy:m6")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("y1", tg_user=tg_user), callback_data="buy:y1")],
         [types.InlineKeyboardButton(text="⭐️ Купить звезды", url=get_star_buy_url())],
         [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:buy")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")],
@@ -1218,7 +1257,7 @@ async def cb_buy_menu(cq: types.CallbackQuery):
     tg_user = cq.from_user
     text = build_buy_menu_text(tg_user)
     try:
-        await cq.message.edit_text(text, reply_markup=get_buy_keyboard(), parse_mode="HTML")
+        await cq.message.edit_text(text, reply_markup=get_buy_keyboard(tg_user), parse_mode="HTML")
     except Exception as e:
         if "not modified" not in str(e):
             logging.error(f"Error editing message: {e}")
@@ -1283,7 +1322,7 @@ async def promo_user_entered(m: Message, state: FSMContext):
 
     if scope == "renew":
         text = f"🔄 <b>Продление подписки:</b>\n\nВыберите срок продления:\n\n🎟 <b>Промокод:</b> <code>{code}</code> (-{promo['percent']}%){exp_txt}"
-        await m.answer(text, reply_markup=get_renew_keyboard(), parse_mode="HTML")
+        await m.answer(text, reply_markup=get_renew_keyboard(tg_user), parse_mode="HTML")
     else:
         text = (
             "💎 <b>Выберите тарифный план:</b>\n\n"
@@ -1292,7 +1331,7 @@ async def promo_user_entered(m: Message, state: FSMContext):
             "♾ Безлимитный трафик\n\n"
             f"🎟 <b>Промокод:</b> <code>{code}</code> (-{promo['percent']}%){exp_txt}"
         )
-        await m.answer(text, reply_markup=get_buy_keyboard(), parse_mode="HTML")
+        await m.answer(text, reply_markup=get_buy_keyboard(tg_user), parse_mode="HTML")
 
 @dp.callback_query(lambda cq: cq.data == "trial_subs")
 async def cb_trial_subs(cq: types.CallbackQuery):
@@ -1419,7 +1458,7 @@ async def cb_renew_menu(cq: types.CallbackQuery):
     tg_user = cq.from_user
     text = build_renew_menu_text(tg_user)
     try:
-        await cq.message.edit_text(text, reply_markup=get_renew_keyboard(), parse_mode="HTML")
+        await cq.message.edit_text(text, reply_markup=get_renew_keyboard(tg_user), parse_mode="HTML")
     except Exception as e:
         if "not modified" not in str(e):
             logging.error(f"Error editing message: {e}")
@@ -1428,12 +1467,12 @@ async def cb_renew_menu(cq: types.CallbackQuery):
         await cq.answer()
 
 # Create renewal keyboard (same as buy but with different callback)
-def get_renew_keyboard():
+def get_renew_keyboard(tg_user: types.User | None = None):
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text=format_plan_price_text("m1"), callback_data="renew:m1")],
-        [types.InlineKeyboardButton(text=format_plan_price_text("m3"), callback_data="renew:m3")],
-        [types.InlineKeyboardButton(text=format_plan_price_text("m6"), callback_data="renew:m6")],
-        [types.InlineKeyboardButton(text=format_plan_price_text("y1"), callback_data="renew:y1")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m1", tg_user=tg_user), callback_data="renew:m1")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m3", tg_user=tg_user), callback_data="renew:m3")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m6", tg_user=tg_user), callback_data="renew:m6")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("y1", tg_user=tg_user), callback_data="renew:y1")],
         [types.InlineKeyboardButton(text="⭐️ Купить звезды", url=get_star_buy_url())],
         [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:renew")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_cabinet")],
@@ -1640,10 +1679,10 @@ async def cb_invoice_back(cq: types.CallbackQuery):
 
     if scope == "renew":
         text = build_renew_menu_text(cq.from_user)
-        await bot.send_message(cq.from_user.id, text, reply_markup=get_renew_keyboard(), parse_mode="HTML")
+        await bot.send_message(cq.from_user.id, text, reply_markup=get_renew_keyboard(cq.from_user), parse_mode="HTML")
     else:
         text = build_buy_menu_text(cq.from_user)
-        await bot.send_message(cq.from_user.id, text, reply_markup=get_buy_keyboard(), parse_mode="HTML")
+        await bot.send_message(cq.from_user.id, text, reply_markup=get_buy_keyboard(cq.from_user), parse_mode="HTML")
 
     await cq.answer()
 
