@@ -39,10 +39,14 @@ def load_settings():
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, dict):
+                    if "maintenance_mode" not in data:
+                        data["maintenance_mode"] = False
+                    if "star_rub_rate" not in data:
+                        data["star_rub_rate"] = None
                     return data
         except Exception as e:
             logging.error(f"Error loading settings: {e}")
-    return {"maintenance_mode": False}
+    return {"maintenance_mode": False, "star_rub_rate": None}
 
 
 def save_settings(data: dict):
@@ -64,6 +68,49 @@ def set_maintenance_mode(value: bool):
     settings["maintenance_mode"] = bool(value)
     settings["updated_at"] = datetime.now(timezone.utc).isoformat()
     save_settings(settings)
+
+
+def get_star_rub_rate() -> float | None:
+    val = settings.get("star_rub_rate")
+    if val is None:
+        return None
+    try:
+        rate = float(val)
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0:
+        return None
+    return rate
+
+
+def set_star_rub_rate(value: float | None):
+    settings["star_rub_rate"] = value
+    settings["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_settings(settings)
+
+
+def calc_price_rub_from_stars(stars: int) -> int | None:
+    rate = get_star_rub_rate()
+    if rate is None:
+        return None
+    try:
+        stars_int = int(stars)
+    except (TypeError, ValueError):
+        return None
+    if stars_int < 0:
+        return None
+    return int(round(stars_int * rate))
+
+
+def format_plan_price_text(plan_key: str) -> str:
+    plan = PLANS.get(plan_key, {})
+    title = plan.get("title", plan_key)
+    stars = plan.get("price")
+    rub = calc_price_rub_from_stars(stars)
+    if rub is None:
+        rub = plan.get("price_rub")
+    rub_part = f" (~{rub}₽)" if isinstance(rub, (int, float)) else ""
+    return f"🗓 {title} — {stars} ⭐️{rub_part}"
 
 
 def get_admin_keyboard():
@@ -357,6 +404,7 @@ PLANS = load_plans()
 
 class AdminStates(StatesGroup):
     waiting_for_price = State()
+    waiting_for_rate = State()
 
 
 class AdminPromoStates(StatesGroup):
@@ -467,10 +515,10 @@ def get_cabinet_keyboard(subs_link: str | None = None):
 # Create buy menu keyboard
 def get_buy_keyboard():
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text=f"🗓 {PLANS['m1']['title']} — {PLANS['m1']['price']} ⭐️ (~{PLANS['m1']['price_rub']}₽)", callback_data="buy:m1")],
-        [types.InlineKeyboardButton(text=f"🗓 {PLANS['m3']['title']} — {PLANS['m3']['price']} ⭐️ (~{PLANS['m3']['price_rub']}₽)", callback_data="buy:m3")],
-        [types.InlineKeyboardButton(text=f"🗓 {PLANS['m6']['title']} — {PLANS['m6']['price']} ⭐️ (~{PLANS['m6']['price_rub']}₽)", callback_data="buy:m6")],
-        [types.InlineKeyboardButton(text=f"🗓 {PLANS['y1']['title']} — {PLANS['y1']['price']} ⭐️ (~{PLANS['y1']['price_rub']}₽)", callback_data="buy:y1")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m1"), callback_data="buy:m1")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m3"), callback_data="buy:m3")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m6"), callback_data="buy:m6")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("y1"), callback_data="buy:y1")],
         [types.InlineKeyboardButton(text="⭐️ Купить звезды", url="https://t.me/PremiumBot")],
         [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:buy")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")],
@@ -866,8 +914,12 @@ async def admin_promo_days(m: Message, state: FSMContext):
 async def cb_admin_prices(cq: types.CallbackQuery):
     if cq.from_user.id != ADMIN_ID:
         return
-        
+
+    rate = get_star_rub_rate()
+    rate_text = f"{rate:g} ₽/⭐️" if isinstance(rate, (int, float)) else "не задан"
+
     buttons = []
+    buttons.append([types.InlineKeyboardButton(text=f"💱 Курс ₽/⭐️: {rate_text}", callback_data="admin_edit_rate")])
     for key, plan in PLANS.items():
         buttons.append([types.InlineKeyboardButton(
             text=f"{plan['title']} — {plan['price']} ⭐️", 
@@ -876,8 +928,34 @@ async def cb_admin_prices(cq: types.CallbackQuery):
     
     buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    await cq.message.edit_text("💰 <b>Выберите тариф для изменения цены:</b>", reply_markup=kb, parse_mode="HTML")
+
+    await cq.message.edit_text(
+        "💰 <b>Настройка тарифов</b>\n\n"
+        "Выберите тариф для изменения цены (в ⭐️), или задайте курс ₽/⭐️.",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(lambda cq: cq.data == "admin_edit_rate")
+async def cb_admin_edit_rate(cq: types.CallbackQuery, state: FSMContext):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    rate = get_star_rub_rate()
+    current = f"{rate:g}" if isinstance(rate, (int, float)) else "не задан"
+    await state.clear()
+    await state.set_state(AdminStates.waiting_for_rate)
+    await cq.message.edit_text(
+        "💱 <b>Курс ₽/⭐️</b>\n\n"
+        f"Текущий курс: <b>{current}</b>\n\n"
+        "Введите курс в рублях за 1 ⭐️ (например: <code>2.6</code>).",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel_edit")]
+        ]),
+    )
+    await cq.answer()
 
 @dp.callback_query(lambda cq: cq.data == "admin_back")
 async def cb_admin_back(cq: types.CallbackQuery):
@@ -935,6 +1013,10 @@ async def process_new_price(m: Message, state: FSMContext):
     
     if plan_key in PLANS:
         PLANS[plan_key]["price"] = new_price
+
+        rub = calc_price_rub_from_stars(new_price)
+        if rub is not None:
+            PLANS[plan_key]["price_rub"] = rub
         save_plans(PLANS)
         
         await m.answer(f"✅ Цена для тарифа <b>{PLANS[plan_key]['title']}</b> изменена на {new_price} ⭐️", parse_mode="HTML")
@@ -944,6 +1026,34 @@ async def process_new_price(m: Message, state: FSMContext):
     else:
         await m.answer("❌ Ошибка: тариф не найден.")
         
+    await state.clear()
+
+
+@dp.message(AdminStates.waiting_for_rate)
+async def process_new_rate(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+
+    raw = (m.text or "").strip().replace(",", ".")
+    try:
+        rate = float(raw)
+        if rate <= 0:
+            raise ValueError
+    except ValueError:
+        await m.answer("❌ Пожалуйста, введите корректное число (например 2.6).")
+        return
+
+    set_star_rub_rate(rate)
+
+    # Keep stored RUB prices consistent with the new rate
+    for _, plan in PLANS.items():
+        rub = calc_price_rub_from_stars(plan.get("price"))
+        if rub is not None:
+            plan["price_rub"] = rub
+    save_plans(PLANS)
+
+    await m.answer(f"✅ Курс установлен: <b>{rate:g}</b> ₽ за 1 ⭐️", parse_mode="HTML")
+    await m.answer("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
     await state.clear()
 
 # start
@@ -1221,10 +1331,10 @@ async def cb_renew_menu(cq: types.CallbackQuery):
 # Create renewal keyboard (same as buy but with different callback)
 def get_renew_keyboard():
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text=f"🗓 {PLANS['m1']['title']} — {PLANS['m1']['price']} ⭐️ (~{PLANS['m1']['price_rub']}₽)", callback_data="renew:m1")],
-        [types.InlineKeyboardButton(text=f"🗓 {PLANS['m3']['title']} — {PLANS['m3']['price']} ⭐️ (~{PLANS['m3']['price_rub']}₽)", callback_data="renew:m3")],
-        [types.InlineKeyboardButton(text=f"🗓 {PLANS['m6']['title']} — {PLANS['m6']['price']} ⭐️ (~{PLANS['m6']['price_rub']}₽)", callback_data="renew:m6")],
-        [types.InlineKeyboardButton(text=f"🗓 {PLANS['y1']['title']} — {PLANS['y1']['price']} ⭐️ (~{PLANS['y1']['price_rub']}₽)", callback_data="renew:y1")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m1"), callback_data="renew:m1")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m3"), callback_data="renew:m3")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("m6"), callback_data="renew:m6")],
+        [types.InlineKeyboardButton(text=format_plan_price_text("y1"), callback_data="renew:y1")],
         [types.InlineKeyboardButton(text="⭐️ Купить звезды", url="https://t.me/PremiumBot")],
         [types.InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo_enter:renew")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_cabinet")],
