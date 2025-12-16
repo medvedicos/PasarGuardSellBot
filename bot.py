@@ -270,6 +270,50 @@ dp.message.middleware(MaintenanceMiddleware())
 dp.callback_query.middleware(MaintenanceMiddleware())
 dp.pre_checkout_query.middleware(MaintenanceMiddleware())
 
+
+def build_admin_promo_manage_view(code: str):
+    code = normalize_promo_code(code)
+    promo = promos_db.get(code)
+    if not isinstance(promo, dict):
+        return None, None
+
+    percent = promo.get("percent")
+    plans = promo.get("plans")
+    expires_at = promo.get("expires_at")
+    active = promo.get("active", True)
+
+    if plans == "*" or (isinstance(plans, list) and "*" in plans):
+        plans_text = "все тарифы"
+    elif isinstance(plans, list):
+        plans_text = ", ".join(plans)
+    else:
+        plans_text = "—"
+
+    if expires_at:
+        exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+        exp_text = exp_dt.strftime("%d.%m.%Y")
+    else:
+        exp_text = "без срока"
+
+    status_text = "✅ активен" if active else "⛔ отключён"
+
+    text = (
+        "🎟 <b>Промокод</b>\n\n"
+        "<b>Код (нажмите, чтобы скопировать):</b>\n"
+        f"<code>{code}</code>\n\n"
+        f"<b>Скидка:</b> {percent}%\n"
+        f"<b>Тарифы:</b> {plans_text}\n"
+        f"<b>Срок:</b> до {exp_text}\n"
+        f"<b>Статус:</b> {status_text}"
+    )
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"admin_promo_disable:{code}"),
+         types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin_promo_delete:{code}")],
+        [types.InlineKeyboardButton(text="🔙 К списку", callback_data="admin_promo_list")],
+    ])
+    return text, kb
+
 # Dictionary to track sent notifications (to avoid duplicates)
 # Format: {user_id: {timestamp_threshold: True, ...}}
 sent_notifications = {}
@@ -642,45 +686,10 @@ async def cb_admin_promo_manage(cq: types.CallbackQuery):
         return
 
     code = normalize_promo_code(cq.data.split(":", 1)[1])
-    promo = promos_db.get(code)
-    if not isinstance(promo, dict):
+    text, kb = build_admin_promo_manage_view(code)
+    if not text:
         await cq.answer("Промокод не найден", show_alert=True)
         return
-
-    percent = promo.get("percent")
-    plans = promo.get("plans")
-    expires_at = promo.get("expires_at")
-    active = promo.get("active", True)
-
-    if plans == "*" or (isinstance(plans, list) and "*" in plans):
-        plans_text = "все тарифы"
-    elif isinstance(plans, list):
-        plans_text = ", ".join(plans)
-    else:
-        plans_text = "—"
-
-    if expires_at:
-        exp_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
-        exp_text = exp_dt.strftime("%d.%m.%Y")
-    else:
-        exp_text = "без срока"
-
-    status_text = "✅ активен" if active else "⛔ отключён"
-
-    text = (
-        "🎟 <b>Промокод</b>\n\n"
-        f"<b>Код:</b> <code>{code}</code>\n"
-        f"<b>Скидка:</b> {percent}%\n"
-        f"<b>Тарифы:</b> {plans_text}\n"
-        f"<b>Срок:</b> до {exp_text}\n"
-        f"<b>Статус:</b> {status_text}"
-    )
-
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"admin_promo_disable:{code}"),
-         types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin_promo_delete:{code}")],
-        [types.InlineKeyboardButton(text="🔙 К списку", callback_data="admin_promo_list")],
-    ])
     await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
@@ -835,13 +844,18 @@ async def admin_promo_days(m: Message, state: FSMContext):
     }
     save_promos_db(promos_db)
 
-    exp_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
-    await m.answer(
-        f"✅ Промокод <code>{code}</code> создан: -{percent}% до {exp_dt.strftime('%d.%m.%Y')}",
-        parse_mode="HTML"
-    )
-
     await state.clear()
+
+    # After creation, open promo manage menu immediately (with copy-friendly code rendering)
+    text, kb = build_admin_promo_manage_view(code)
+    if text and kb:
+        await m.answer(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        exp_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+        await m.answer(
+            f"✅ Промокод <code>{code}</code> создан: -{percent}% до {exp_dt.strftime('%d.%m.%Y')}",
+            parse_mode="HTML"
+        )
 
 @dp.callback_query(lambda cq: cq.data == "admin_prices")
 async def cb_admin_prices(cq: types.CallbackQuery):
