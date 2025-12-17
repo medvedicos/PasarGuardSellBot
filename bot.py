@@ -1285,7 +1285,7 @@ async def cb_promo_enter(cq: types.CallbackQuery, state: FSMContext):
     await cq.answer()
 
 
-@dp.message(PromoUserStates.waiting_for_code)
+@dp.message(PromoUserStates.waiting_for_code, F.text)
 async def promo_user_entered(m: Message, state: FSMContext):
     tg_user = m.from_user
     mb_username = build_marzban_username(tg_user)
