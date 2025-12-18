@@ -10,11 +10,12 @@ import aiohttp
 from marzpy import Marzban
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import LabeledPrice, Invoice, PreCheckoutQuery, Message, CallbackQuery
+from aiogram.types import LabeledPrice, Invoice, PreCheckoutQuery, Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
+import qrcode
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -202,6 +203,22 @@ def format_plan_price_text(plan_key: str, tg_user: types.User | None = None) -> 
 
     rub_part = f" (~{int(rub)}₽)" if isinstance(rub, (int, float)) else ""
     return f"🗓 {title} — {stars} ⭐️{rub_part}{discount_part}"
+
+
+def build_subscription_qr_png_bytes(subs_link: str) -> bytes:
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=2,
+    )
+    qr.add_data(subs_link)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    import io
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def get_admin_keyboard():
@@ -596,6 +613,7 @@ def get_cabinet_keyboard(subs_link: str | None = None):
     rows = []
     if subs_link:
         rows.append([types.InlineKeyboardButton(text="🌍 Открыть подписку", url=subs_link)])
+        rows.append([types.InlineKeyboardButton(text="📱 QR-код", callback_data="cabinet_qr")])
 
     rows.extend([
         [types.InlineKeyboardButton(text="💎 Купить/продлить", callback_data="renew_menu")],
@@ -1252,6 +1270,113 @@ async def cb_cabinet(cq: types.CallbackQuery):
             await cq.answer("❌ Ошибка при обновлении", show_alert=True)
     else:
         await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data == "cabinet_qr")
+async def cb_cabinet_qr(cq: types.CallbackQuery):
+    tg_user = cq.from_user
+    mb_username = build_marzban_username(tg_user)
+
+    user_data = await marzban_get_user(mb_username)
+    subs_link = None
+    if user_data is not None:
+        subs_link = user_data.get("subscription_url")
+    if not subs_link:
+        subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+
+    if user_data is None:
+        await cq.answer("❌ Подписка не активна", show_alert=True)
+        return
+
+    try:
+        png_bytes = build_subscription_qr_png_bytes(subs_link)
+    except Exception as e:
+        logging.error(f"QR generation error: {e}")
+        await cq.answer("❌ Не удалось создать QR-код", show_alert=True)
+        return
+
+    try:
+        await cq.message.delete()
+    except Exception as e:
+        logging.warning(f"Could not delete cabinet message: {e}")
+
+    qr_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="⬇️ Скачать QR-код", callback_data="qr_download")],
+        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="qr_back")],
+    ])
+
+    photo = BufferedInputFile(png_bytes, filename="subscription_qr.png")
+    await bot.send_photo(
+        chat_id=tg_user.id,
+        photo=photo,
+        caption="📱 <b>QR-код подписки</b>\n\nОтсканируйте QR-код в вашем VPN-приложении.",
+        parse_mode="HTML",
+        reply_markup=qr_kb,
+    )
+    await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data == "qr_download")
+async def cb_qr_download(cq: types.CallbackQuery):
+    tg_user = cq.from_user
+    mb_username = build_marzban_username(tg_user)
+    user_data = await marzban_get_user(mb_username)
+
+    subs_link = None
+    if user_data is not None:
+        subs_link = user_data.get("subscription_url")
+    if not subs_link:
+        subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+
+    try:
+        png_bytes = build_subscription_qr_png_bytes(subs_link)
+    except Exception as e:
+        logging.error(f"QR generation error: {e}")
+        await cq.answer("❌ Не удалось создать QR-код", show_alert=True)
+        return
+
+    doc = BufferedInputFile(png_bytes, filename="subscription_qr.png")
+    await bot.send_document(chat_id=tg_user.id, document=doc, caption="📱 QR-код подписки")
+    await cq.answer("✅ Отправил", show_alert=False)
+
+
+@dp.callback_query(lambda cq: cq.data == "qr_back")
+async def cb_qr_back(cq: types.CallbackQuery):
+    tg_user = cq.from_user
+    mb_username = build_marzban_username(tg_user)
+
+    try:
+        await cq.message.delete()
+    except Exception as e:
+        logging.warning(f"Could not delete QR message: {e}")
+
+    user_data = await marzban_get_user(mb_username)
+    subs_link = None
+    if user_data is None:
+        text = (
+            "👤 <b>Личный кабинет</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n\n"
+            "❌ <b>Подписка не активна</b>\n\n"
+            "Чтобы получить доступ к VPN, оформите подписку или используйте пробный период."
+        )
+    else:
+        text = (
+            "👤 <b>Личный кабинет</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{format_user_info(user_data)}\n\n"
+            "🌍 <i>Подключение:</i> нажмите кнопку <b>Открыть подписку</b> ниже."
+        )
+        subs_link = user_data.get("subscription_url")
+        if not subs_link:
+            subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+
+    await bot.send_message(
+        chat_id=tg_user.id,
+        text=text,
+        reply_markup=get_cabinet_keyboard(subs_link=subs_link),
+        parse_mode="HTML",
+    )
+    await cq.answer()
 
 @dp.callback_query(lambda cq: cq.data == "buy_menu")
 async def cb_buy_menu(cq: types.CallbackQuery):
