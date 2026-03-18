@@ -1,4 +1,7 @@
-# MArzbanBot (Docker)
+# PasarGuardBot (Docker)
+
+Telegram-бот для продажи VPN-подписок через панель PasarGuard.
+Оплата через Telegram Stars. Поддержка промокодов, пробного периода, уведомлений об истечении подписки.
 
 ## Что хранить в GitHub
 В репозиторий кладём код и Docker-файлы.
@@ -8,29 +11,33 @@
 
 ### 1) Подготовка папки
 ```bash
-sudo mkdir -p /opt/MArzbanBot
-sudo chown -R $USER:$USER /opt/MArzbanBot
+sudo mkdir -p /opt/PasarGuardBot
+sudo chown -R $USER:$USER /opt/PasarGuardBot
 ```
 
 ### 2) Клонирование
 ```bash
 cd /opt
-git clone <YOUR_GITHUB_REPO_URL> MArzbanBot
-cd /opt/MArzbanBot
+git clone <YOUR_GITHUB_REPO_URL> PasarGuardBot
+cd /opt/PasarGuardBot
 ```
 
 ### 3) Создать `.env` на VPS
 ```bash
+cp .env.example .env
 nano .env
 ```
 Минимум:
 - `BOT_TOKEN=...`
-- `MARZBAN_URL=...`
-- `MARZBAN_ADMIN_USERNAME=...`
-- `MARZBAN_ADMIN_PASSWORD=...`
+- `PANEL_URL=...`
+- `PANEL_ADMIN_USERNAME=...`
+- `PANEL_ADMIN_PASSWORD=...`
 
 (опционально)
 - `SUBS_LINK_TEMPLATE=...`
+- `PANEL_PROXY_TYPE=...`
+- `PANEL_INBOUND_TAG=...`
+- `PANEL_PROXY_FLOW=...`
 
 ### 4) Запуск
 ```bash
@@ -40,7 +47,7 @@ sudo docker compose logs -f
 
 ## Обновление
 ```bash
-cd /opt/MArzbanBot
+cd /opt/PasarGuardBot
 git pull
 sudo docker compose up -d --build
 ```

@@ -7,7 +7,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 import aiohttp
-from marzpy import Marzban
+# PasarGuard panel integration via direct HTTP API calls
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import LabeledPrice, Invoice, PreCheckoutQuery, Message, CallbackQuery, BufferedInputFile
@@ -109,8 +109,8 @@ def calc_price_rub_from_stars(stars: int) -> int | None:
 def get_discount_percent_for_plan(tg_user: types.User | None, plan_key: str) -> int | None:
     if tg_user is None:
         return None
-    mb_username = build_marzban_username(tg_user)
-    pending_code = get_user_pending_promo_code(mb_username)
+    panel_username = build_panel_username(tg_user)
+    pending_code = get_user_pending_promo_code(panel_username)
     if not pending_code:
         return None
     promo = get_valid_promo(pending_code)
@@ -388,8 +388,8 @@ def mark_promo_used_for_tg_id(tg_id: int, code: str):
     save_promo_usage_db(promo_usage_db)
 
 
-def get_user_pending_promo_code(mb_username: str):
-    entry = users_db.get(mb_username, {})
+def get_user_pending_promo_code(panel_username: str):
+    entry = users_db.get(panel_username, {})
     code = entry.get("pending_promo")
     if isinstance(code, str) and code.strip():
         return normalize_promo_code(code)
@@ -400,10 +400,15 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://yourdomain.com/webhook/te
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8443"))
 
-MARZBAN_URL = os.getenv("MARZBAN_URL", "https://misavpn.top")
-MARZBAN_ADMIN_USERNAME = os.getenv("MARZBAN_ADMIN_USERNAME")
-MARZBAN_ADMIN_PASSWORD = os.getenv("MARZBAN_ADMIN_PASSWORD")
-SUBS_LINK_TEMPLATE = os.getenv("SUBS_LINK_TEMPLATE", f"{MARZBAN_URL}/vpnsubs/{{username}}")
+PANEL_URL = os.getenv("PANEL_URL", "https://example.com")
+PANEL_ADMIN_USERNAME = os.getenv("PANEL_ADMIN_USERNAME")
+PANEL_ADMIN_PASSWORD = os.getenv("PANEL_ADMIN_PASSWORD")
+SUBS_LINK_TEMPLATE = os.getenv("SUBS_LINK_TEMPLATE", f"{PANEL_URL}/sub/{{username}}")
+
+# Proxy/inbound configuration for PasarGuard user creation
+PANEL_PROXY_TYPE = os.getenv("PANEL_PROXY_TYPE", "vless")
+PANEL_INBOUND_TAG = os.getenv("PANEL_INBOUND_TAG", "VLESS TCP REALITY")
+PANEL_PROXY_FLOW = os.getenv("PANEL_PROXY_FLOW", "xtls-rprx-vision")
 
 if not BOT_TOKEN:
     print("⚠️ BOT_TOKEN не установлен в .env файле")
@@ -526,22 +531,38 @@ class AdminPromoStates(StatesGroup):
 class PromoUserStates(StatesGroup):
     waiting_for_code = State()
 
-# Get user subscription info from Marzban
-async def marzban_get_user(username: str):
-    """Fetch user info from Marzban"""
+# Get admin token from PasarGuard panel
+async def get_panel_token() -> str | None:
+    """Authenticate with PasarGuard panel and return access token"""
     try:
-        api = Marzban(username=MARZBAN_ADMIN_USERNAME, password=MARZBAN_ADMIN_PASSWORD, panel_address=MARZBAN_URL)
-        token_data = await api.get_token()
-        token = token_data.get("access_token") if isinstance(token_data, dict) else token_data.access_token
-        
+        async with aiohttp.ClientSession() as session:
+            url = f"{PANEL_URL}/api/admin/token"
+            data = aiohttp.FormData()
+            data.add_field("username", PANEL_ADMIN_USERNAME)
+            data.add_field("password", PANEL_ADMIN_PASSWORD)
+            async with session.post(url, data=data, ssl=False) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    return result.get("access_token")
+                else:
+                    logging.error(f"Failed to get panel token: {resp.status}")
+                    return None
+    except Exception as e:
+        logging.error(f"Error getting panel token: {e}")
+        return None
+
+# Get user subscription info from PasarGuard
+async def panel_get_user(username: str):
+    """Fetch user info from PasarGuard"""
+    try:
+        token = await get_panel_token()
         if not token:
-            logging.error("Failed to get Marzban token")
             return None
-        
+
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {token}"}
-            url = f"{MARZBAN_URL}/api/user/{username}"
-            
+            url = f"{PANEL_URL}/api/user/{username}"
+
             async with session.get(url, headers=headers, ssl=False) as resp:
                 if resp.status == 200:
                     return await resp.json()
@@ -635,52 +656,44 @@ def get_buy_keyboard(tg_user: types.User | None = None):
     ])
     return kb
 
-# create user in marzban
-async def marzban_create_user(username: str, expire_ts: int):
+# create user in PasarGuard
+async def panel_create_user(username: str, expire_ts: int):
     try:
-        api = Marzban(username=MARZBAN_ADMIN_USERNAME, password=MARZBAN_ADMIN_PASSWORD, panel_address=MARZBAN_URL)
-        token_data = await api.get_token()
-        token = token_data.get("access_token") if isinstance(token_data, dict) else token_data.access_token
-        
+        token = await get_panel_token()
         if not token:
-            logging.error("Failed to get Marzban token")
             return None
-        
+
         logging.info(f"Создаём пользователя: {username}, expire_ts: {expire_ts}")
-        
-        # Use direct HTTP POST instead of marzpy.add_user which has bugs
-        # Create payload for direct API call
+
         payload = {
             "username": username,
             "proxies": {
-                "vless": {
+                PANEL_PROXY_TYPE: {
                     "id": str(uuid.uuid4()),
-                    "flow": "xtls-rprx-vision"
+                    "flow": PANEL_PROXY_FLOW
                 }
             },
-            "inbounds": {"vless": ["Steal"]},
+            "inbounds": {PANEL_PROXY_TYPE: [PANEL_INBOUND_TAG]},
             "data_limit": 0,
             "expire": expire_ts,
             "status": "active"
         }
-        
+
         logging.info(f"📤 Payload: {payload}")
-        
+
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {token}"}
-            url = f"{MARZBAN_URL}/api/user"
-            
+            url = f"{PANEL_URL}/api/user"
+
             async with session.post(url, json=payload, headers=headers, ssl=False) as resp:
                 logging.info(f"   API Response status: {resp.status}")
                 data = await resp.json()
-                
+
                 if resp.status in (200, 201):
-                    logging.info(f"✓ User created successfully via HTTP")
-                    # Query user immediately to get final subscription_url (Marzban regenerates it on each query)
-                    # This ensures we get the same URL that admin panel will show
-                    await asyncio.sleep(0.1)  # Small delay to ensure server has fully written the user
-                    
-                    get_url = f"{MARZBAN_URL}/api/user/{username}"
+                    logging.info(f"✓ User created successfully")
+                    await asyncio.sleep(0.1)
+
+                    get_url = f"{PANEL_URL}/api/user/{username}"
                     async with session.get(get_url, headers=headers, ssl=False) as get_resp:
                         if get_resp.status == 200:
                             user_data = await get_resp.json()
@@ -690,48 +703,41 @@ async def marzban_create_user(username: str, expire_ts: int):
                             logging.warning(f"Could not fetch user after creation (status {get_resp.status}), using create response")
                             return data
                 elif resp.status == 409:
-                    # User already exists, update instead of create
                     logging.info(f"ℹ User {username} already exists (409), updating expiry instead")
-                    return await marzban_update_user(username, expire_ts)
+                    return await panel_update_user(username, expire_ts)
                 else:
                     logging.error(f"✗ Failed to create user: {resp.status}")
                     logging.error(f"   Response: {data}")
                     return None
-            
+
     except Exception as e:
         logging.error(f"Ошибка создания пользователя: {type(e).__name__}: {e}", exc_info=True)
         return None
 
 # Update user subscription (extend expiry date)
-async def marzban_update_user(username: str, new_expire_ts: int):
-    """Update user expiry date in Marzban"""
+async def panel_update_user(username: str, new_expire_ts: int):
+    """Update user expiry date in PasarGuard"""
     try:
-        api = Marzban(username=MARZBAN_ADMIN_USERNAME, password=MARZBAN_ADMIN_PASSWORD, panel_address=MARZBAN_URL)
-        token_data = await api.get_token()
-        token = token_data.get("access_token") if isinstance(token_data, dict) else token_data.access_token
-        
+        token = await get_panel_token()
         if not token:
-            logging.error("Failed to get Marzban token")
             return None
-        
+
         logging.info(f"Обновляем подписку: {username}, new_expire_ts: {new_expire_ts}")
-        
-        # Create payload for update (only expire field)
+
         payload = {
             "expire": new_expire_ts
         }
-        
+
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {token}"}
-            url = f"{MARZBAN_URL}/api/user/{username}"
-            
+            url = f"{PANEL_URL}/api/user/{username}"
+
             async with session.put(url, json=payload, headers=headers, ssl=False) as resp:
                 logging.info(f"   API Response status: {resp.status}")
                 data = await resp.json()
-                
+
                 if resp.status in (200, 201):
                     logging.info(f"✓ User updated successfully")
-                    # Get fresh data
                     async with session.get(url, headers=headers, ssl=False) as get_resp:
                         if get_resp.status == 200:
                             user_data = await get_resp.json()
@@ -743,13 +749,13 @@ async def marzban_update_user(username: str, new_expire_ts: int):
                     logging.error(f"✗ Failed to update user: {resp.status}")
                     logging.error(f"   Response: {data}")
                     return None
-            
+
     except Exception as e:
         logging.error(f"Ошибка обновления подписки: {type(e).__name__}: {e}", exc_info=True)
         return None
-def build_marzban_username(tg_user: types.User):
+def build_panel_username(tg_user: types.User):
     if tg_user.username:
-        # normalize: allowed a-z,0-9, underscore, 3-32 chars for many marzban rules
+        # normalize: allowed a-z,0-9, underscore, 3-32 chars
         raw = tg_user.username.lower()
         # keep only allowed chars:
         import re
@@ -1219,7 +1225,7 @@ async def process_new_star_buy_bot(m: Message, state: FSMContext):
 async def cmd_start(m: Message):
     logging.info(f"Команда /start от {m.from_user.username or m.from_user.id}")
     text = (
-        "👋 <b>Привет! Я MiSa VPN Bot</b> — твой проводник в свободный интернет!\n\n"
+        "👋 <b>Привет! Я PasarGuard VPN Bot</b> — твой проводник в свободный интернет!\n\n"
         "🚀 <b>Почему выбирают нас?</b>\n"
         "• Высокая скорость без ограничений\n"
         "• Работает Instagram, YouTube, Netflix и др.\n"
@@ -1234,10 +1240,10 @@ async def cmd_start(m: Message):
 async def cb_cabinet(cq: types.CallbackQuery):
     """Show user cabinet with subscription info"""
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
     
-    # Get user info from Marzban
-    user_data = await marzban_get_user(mb_username)
+    # Get user info from panel
+    user_data = await panel_get_user(panel_username)
     
     subs_link = None
     if user_data is None:
@@ -1256,7 +1262,7 @@ async def cb_cabinet(cq: types.CallbackQuery):
         )
         subs_link = user_data.get("subscription_url")
         if not subs_link:
-            subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+            subs_link = SUBS_LINK_TEMPLATE.format(username=panel_username)
     
     # Edit previous message instead of sending new one
     try:
@@ -1275,14 +1281,14 @@ async def cb_cabinet(cq: types.CallbackQuery):
 @dp.callback_query(lambda cq: cq.data == "cabinet_qr")
 async def cb_cabinet_qr(cq: types.CallbackQuery):
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
 
-    user_data = await marzban_get_user(mb_username)
+    user_data = await panel_get_user(panel_username)
     subs_link = None
     if user_data is not None:
         subs_link = user_data.get("subscription_url")
     if not subs_link:
-        subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+        subs_link = SUBS_LINK_TEMPLATE.format(username=panel_username)
 
     if user_data is None:
         await cq.answer("❌ Подписка не активна", show_alert=True)
@@ -1319,14 +1325,14 @@ async def cb_cabinet_qr(cq: types.CallbackQuery):
 @dp.callback_query(lambda cq: cq.data == "qr_download")
 async def cb_qr_download(cq: types.CallbackQuery):
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
-    user_data = await marzban_get_user(mb_username)
+    panel_username = build_panel_username(tg_user)
+    user_data = await panel_get_user(panel_username)
 
     subs_link = None
     if user_data is not None:
         subs_link = user_data.get("subscription_url")
     if not subs_link:
-        subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+        subs_link = SUBS_LINK_TEMPLATE.format(username=panel_username)
 
     try:
         png_bytes = build_subscription_qr_png_bytes(subs_link)
@@ -1343,14 +1349,14 @@ async def cb_qr_download(cq: types.CallbackQuery):
 @dp.callback_query(lambda cq: cq.data == "qr_back")
 async def cb_qr_back(cq: types.CallbackQuery):
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
 
     try:
         await cq.message.delete()
     except Exception as e:
         logging.warning(f"Could not delete QR message: {e}")
 
-    user_data = await marzban_get_user(mb_username)
+    user_data = await panel_get_user(panel_username)
     subs_link = None
     if user_data is None:
         text = (
@@ -1368,7 +1374,7 @@ async def cb_qr_back(cq: types.CallbackQuery):
         )
         subs_link = user_data.get("subscription_url")
         if not subs_link:
-            subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+            subs_link = SUBS_LINK_TEMPLATE.format(username=panel_username)
 
     await bot.send_message(
         chat_id=tg_user.id,
@@ -1413,7 +1419,7 @@ async def cb_promo_enter(cq: types.CallbackQuery, state: FSMContext):
 @dp.message(PromoUserStates.waiting_for_code, F.text)
 async def promo_user_entered(m: Message, state: FSMContext):
     tg_user = m.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
     code = normalize_promo_code(m.text)
 
     data = await state.get_data()
@@ -1429,9 +1435,9 @@ async def promo_user_entered(m: Message, state: FSMContext):
         await m.answer("❌ Этот промокод уже использован на вашем аккаунте.")
         return
 
-    users_db.setdefault(mb_username, {})
-    users_db[mb_username]["pending_promo"] = code
-    users_db[mb_username]["pending_promo_set_at"] = datetime.now(timezone.utc).isoformat()
+    users_db.setdefault(panel_username, {})
+    users_db[panel_username]["pending_promo"] = code
+    users_db[panel_username]["pending_promo_set_at"] = datetime.now(timezone.utc).isoformat()
     save_users_db(users_db)
 
     expires_at = promo.get("expires_at")
@@ -1464,16 +1470,16 @@ async def promo_user_entered(m: Message, state: FSMContext):
 async def cb_trial_subs(cq: types.CallbackQuery):
     """Activate trial subscription"""
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
     
     # Check if trial already used
-    user_info = users_db.get(mb_username, {})
+    user_info = users_db.get(panel_username, {})
     if user_info.get("trial_used"):
         await cq.answer("❌ Вы уже использовали пробный период!", show_alert=True)
         return
 
     # Check if user already has active subscription
-    user_data = await marzban_get_user(mb_username)
+    user_data = await panel_get_user(panel_username)
     if user_data and user_data.get("status") == "active":
         expire_ts = user_data.get("expire")
         if expire_ts and expire_ts > datetime.now(timezone.utc).timestamp():
@@ -1487,16 +1493,16 @@ async def cb_trial_subs(cq: types.CallbackQuery):
     
     # Create or update user
     if user_data:
-        res = await marzban_update_user(mb_username, expire_ts)
+        res = await panel_update_user(panel_username, expire_ts)
     else:
-        res = await marzban_create_user(mb_username, expire_ts)
+        res = await panel_create_user(panel_username, expire_ts)
         
     if res:
         # Update DB
-        if mb_username not in users_db:
-            users_db[mb_username] = {}
+        if panel_username not in users_db:
+            users_db[panel_username] = {}
             
-        users_db[mb_username].update({
+        users_db[panel_username].update({
             "tg_id": tg_user.id,
             "tg_username": tg_user.username,
             "expire_ts": expire_ts,
@@ -1507,7 +1513,7 @@ async def cb_trial_subs(cq: types.CallbackQuery):
         
         subs_link = res.get("subscription_url")
         if not subs_link:
-            subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+            subs_link = SUBS_LINK_TEMPLATE.format(username=panel_username)
             
         text = (
             f"🎁 <b>Пробный период активирован!</b>\n\n"
@@ -1523,7 +1529,7 @@ async def cb_trial_subs(cq: types.CallbackQuery):
 async def cb_back_to_menu(cq: types.CallbackQuery):
     """Go back to main menu"""
     text = (
-        "👋 <b>Привет! Я MiSa VPN Bot</b> — твой проводник в свободный интернет!\n\n"
+        "👋 <b>Привет! Я PasarGuard VPN Bot</b> — твой проводник в свободный интернет!\n\n"
         "🚀 <b>Почему выбирают нас?</b>\n"
         "• Высокая скорость без ограничений\n"
         "• Работает Instagram, YouTube, Netflix и др.\n"
@@ -1544,10 +1550,10 @@ async def cb_back_to_menu(cq: types.CallbackQuery):
 async def cb_get_link(cq: types.CallbackQuery):
     """Send subscription link"""
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
     
-    # Get user info from Marzban
-    user_data = await marzban_get_user(mb_username)
+    # Get user info from panel
+    user_data = await panel_get_user(panel_username)
     
     if user_data is None:
         text = (
@@ -1562,7 +1568,7 @@ async def cb_get_link(cq: types.CallbackQuery):
     else:
         subs_link = user_data.get("subscription_url")
         if not subs_link:
-            subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+            subs_link = SUBS_LINK_TEMPLATE.format(username=panel_username)
         
         text = (
             f"<b>🔗 Ваша ссылка для подключения:</b>\n\n"
@@ -1608,8 +1614,8 @@ def get_renew_keyboard(tg_user: types.User | None = None):
 
 
 def build_buy_menu_text(tg_user: types.User) -> str:
-    mb_username = build_marzban_username(tg_user)
-    pending_code = get_user_pending_promo_code(mb_username)
+    panel_username = build_panel_username(tg_user)
+    pending_code = get_user_pending_promo_code(panel_username)
     promo_line = "🎟 <b>Промокод:</b> не задан"
     if pending_code:
         promo = get_valid_promo(pending_code)
@@ -1633,8 +1639,8 @@ def build_buy_menu_text(tg_user: types.User) -> str:
 
 
 def build_renew_menu_text(tg_user: types.User) -> str:
-    mb_username = build_marzban_username(tg_user)
-    pending_code = get_user_pending_promo_code(mb_username)
+    panel_username = build_panel_username(tg_user)
+    pending_code = get_user_pending_promo_code(panel_username)
     promo_line = "🎟 <b>Промокод:</b> не задан"
     if pending_code:
         promo = get_valid_promo(pending_code)
@@ -1658,9 +1664,9 @@ def build_renew_menu_text(tg_user: types.User) -> str:
 async def cb_back_to_cabinet(cq: types.CallbackQuery):
     """Go back to cabinet"""
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
     
-    user_data = await marzban_get_user(mb_username)
+    user_data = await panel_get_user(panel_username)
     
     subs_link = None
     if user_data is None:
@@ -1673,7 +1679,7 @@ async def cb_back_to_cabinet(cq: types.CallbackQuery):
         text = f"👤 <b>Мой профиль</b>\n\n{format_user_info(user_data)}"
         subs_link = user_data.get("subscription_url")
         if not subs_link:
-            subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+            subs_link = SUBS_LINK_TEMPLATE.format(username=panel_username)
     
     try:
         await cq.message.edit_text(text, reply_markup=get_cabinet_keyboard(subs_link=subs_link), parse_mode="HTML")
@@ -1701,12 +1707,12 @@ async def cb_renew(cq: types.CallbackQuery):
     
     # Create invoice (Stars) with optional promo discount
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
     base_price = int(plan["price"])
     final_price = base_price
     applied_promo = None
 
-    pending_code = get_user_pending_promo_code(mb_username)
+    pending_code = get_user_pending_promo_code(panel_username)
     if pending_code:
         promo = get_valid_promo(pending_code)
         if promo and promo_applies_to_plan(promo, plan_key) and pending_code not in get_used_promos_for_tg_id(tg_user.id):
@@ -1756,12 +1762,12 @@ async def cb_buy(cq: types.CallbackQuery):
     
     # Create invoice (Stars) with optional promo discount
     tg_user = cq.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
     base_price = int(plan["price"])
     final_price = base_price
     applied_promo = None
 
-    pending_code = get_user_pending_promo_code(mb_username)
+    pending_code = get_user_pending_promo_code(panel_username)
     if pending_code:
         promo = get_valid_promo(pending_code)
         if promo and promo_applies_to_plan(promo, plan_key) and pending_code not in get_used_promos_for_tg_id(tg_user.id):
@@ -1840,15 +1846,15 @@ async def on_success(m: Message):
         applied_promo = None
     plan = PLANS.get(plan_key) if plan_key else None
 
-    # Build marzban username
+    # Build panel username
     tg_user = m.from_user
-    mb_username = build_marzban_username(tg_user)
+    panel_username = build_panel_username(tg_user)
 
     # compute expire timestamp (UTC) in seconds
     days = plan["days"] if plan else 30
     
     # Determine expiry date - ALWAYS add to existing expiry if user exists
-    user_data = await marzban_get_user(mb_username)
+    user_data = await panel_get_user(panel_username)
     if user_data and user_data.get("expire"):
         # User already has subscription, add days to current expiry
         current_expire_ts = user_data.get("expire")
@@ -1868,14 +1874,14 @@ async def on_success(m: Message):
     expire_ts = int(expire_dt.timestamp())
     logging.info(f"Plan: {plan_key}, Expire datetime: {expire_dt}, Expire timestamp: {expire_ts}")
 
-    # Create or update user in Marzban
+    # Create or update user in PasarGuard
     if user_data:
         # User already exists, always update
-        res = await marzban_update_user(mb_username, expire_ts)
+        res = await panel_update_user(panel_username, expire_ts)
         action_text = "продлена"
     else:
         # User doesn't exist, create new
-        res = await marzban_create_user(mb_username, expire_ts)
+        res = await panel_create_user(panel_username, expire_ts)
         action_text = "активирована"
         
     logging.info(f"Operation result: {res}")
@@ -1890,32 +1896,32 @@ async def on_success(m: Message):
         if promo and promo_applies_to_plan(promo, plan_key):
             mark_promo_used_for_tg_id(tg_user.id, applied_promo)
 
-            # Clear pending promo (stored by marzban username)
-            users_db.setdefault(mb_username, {})
-            if normalize_promo_code(users_db[mb_username].get("pending_promo")) == applied_promo:
-                users_db[mb_username].pop("pending_promo", None)
-                users_db[mb_username].pop("pending_promo_set_at", None)
+            # Clear pending promo (stored by panel username)
+            users_db.setdefault(panel_username, {})
+            if normalize_promo_code(users_db[panel_username].get("pending_promo")) == applied_promo:
+                users_db[panel_username].pop("pending_promo", None)
+                users_db[panel_username].pop("pending_promo_set_at", None)
                 save_users_db(users_db)
     
     # Save or update user to database for notification system
-    users_db[mb_username] = {
+    users_db[panel_username] = {
         "tg_id": tg_user.id,
         "tg_username": tg_user.username,
         "expire_ts": expire_ts,
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
     save_users_db(users_db)
-    logging.info(f"Updated user {mb_username} (TG ID: {tg_user.id}) in database")
+    logging.info(f"Updated user {panel_username} (TG ID: {tg_user.id}) in database")
     
     # Get subscription URL (prefer API response, fallback to template)
     subs_link = res.get("subscription_url")
     if not subs_link:
-        subs_link = SUBS_LINK_TEMPLATE.format(username=mb_username)
+        subs_link = SUBS_LINK_TEMPLATE.format(username=panel_username)
 
     logging.info(f"Subscription link: {subs_link}")
 
     # Fetch fresh user data for a nice cabinet view (fallback to res)
-    fresh_user_data = await marzban_get_user(mb_username)
+    fresh_user_data = await panel_get_user(panel_username)
     if not fresh_user_data:
         fresh_user_data = res
 
@@ -1935,19 +1941,16 @@ async def run_subscription_check():
     logging.info("🔍 Checking subscriptions...")
     
     try:
-        # Get all users from Marzban
-        api = Marzban(username=MARZBAN_ADMIN_USERNAME, password=MARZBAN_ADMIN_PASSWORD, panel_address=MARZBAN_URL)
-        token_data = await api.get_token()
-        token = token_data.get("access_token") if isinstance(token_data, dict) else token_data.access_token
-        
+        # Get all users from PasarGuard
+        token = await get_panel_token()
         if not token:
-            logging.error("Failed to get Marzban token for subscription check")
+            logging.error("Failed to get panel token for subscription check")
             return
-        
+
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {token}"}
-            
-            async with session.get(f"{MARZBAN_URL}/api/users", headers=headers, ssl=False) as resp:
+
+            async with session.get(f"{PANEL_URL}/api/user/s", headers=headers, ssl=False) as resp:
                 if resp.status != 200:
                     logging.warning(f"Could not fetch users: {resp.status}")
                     return

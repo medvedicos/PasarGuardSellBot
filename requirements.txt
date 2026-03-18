@@ -1,9 +1,6 @@
 aiogram==3.5.0
-# aiogram==3.5.0 depends on aiohttp~=3.9.0 (use a Python 3.12 compatible 3.9.x wheel)
 aiohttp==3.9.5
 python-dotenv==1.0.0
-# marzpy 0.0.6 is not published on PyPI; latest available is 0.0.5
-marzpy==0.0.5
 
 # QR code generation for subscription links
 qrcode[pil]==7.4.2

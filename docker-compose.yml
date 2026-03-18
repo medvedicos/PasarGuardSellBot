@@ -1,8 +1,8 @@
 services:
-  marzbanbot:
+  pasarguardbot:
     build:
       context: .
-    container_name: marzbanbot
+    container_name: pasarguardbot
     restart: unless-stopped
     user: "0:0"
     env_file:
