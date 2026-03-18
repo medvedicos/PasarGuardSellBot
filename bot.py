@@ -27,6 +27,8 @@ USERS_DB_FILE = "users_db.json"
 PLANS_FILE = "plans.json"
 PROMOS_FILE = "promos.json"
 PROMO_USAGE_FILE = "promo_usage.json"
+REFERRALS_FILE = "referrals.json"
+TICKETS_FILE = "tickets.json"
 SETTINGS_FILE = "settings.json"
 
 MAINTENANCE_TEXT = (
@@ -47,10 +49,14 @@ def load_settings():
                         data["star_rub_rate"] = None
                     if "star_buy_url" not in data:
                         data["star_buy_url"] = "https://t.me/PremiumBot"
+                    if "required_channel" not in data:
+                        data["required_channel"] = None
+                    if "referral_bonus_days" not in data:
+                        data["referral_bonus_days"] = 3
                     return data
         except Exception as e:
             logging.error(f"Error loading settings: {e}")
-    return {"maintenance_mode": False, "star_rub_rate": None, "star_buy_url": "https://t.me/PremiumBot"}
+    return {"maintenance_mode": False, "star_rub_rate": None, "star_buy_url": "https://t.me/PremiumBot", "required_channel": None, "referral_bonus_days": 3}
 
 
 def save_settings(data: dict):
@@ -224,9 +230,14 @@ def build_subscription_qr_png_bytes(subs_link: str) -> bytes:
 def get_admin_keyboard():
     maintenance_on = is_maintenance_mode()
     maintenance_text = "🛠 Техработы: ВКЛ" if maintenance_on else "🛠 Техработы: ВЫКЛ"
+    channel = get_required_channel()
+    channel_text = f"📢 Канал: @{channel}" if channel else "📢 Канал: не задан"
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="💰 Сменить тарифы", callback_data="admin_prices")],
         [types.InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin_promos")],
+        [types.InlineKeyboardButton(text=channel_text, callback_data="admin_channel")],
+        [types.InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_broadcast")],
+        [types.InlineKeyboardButton(text="🎫 Тикеты", callback_data="admin_tickets")],
         [types.InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance")],
     ])
     return kb
@@ -388,6 +399,132 @@ def mark_promo_used_for_tg_id(tg_id: int, code: str):
     save_promo_usage_db(promo_usage_db)
 
 
+# ── Referrals DB ──────────────────────────────────────────────
+def load_referrals_db():
+    if os.path.exists(REFERRALS_FILE):
+        try:
+            with open(REFERRALS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading referrals DB: {e}")
+    return {}
+
+
+def save_referrals_db(data):
+    try:
+        with open(REFERRALS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving referrals DB: {e}")
+
+
+referrals_db = load_referrals_db()
+
+
+def get_referral_bonus_days() -> int:
+    try:
+        return int(settings.get("referral_bonus_days", 3))
+    except (TypeError, ValueError):
+        return 3
+
+
+def set_referral_bonus_days(days: int):
+    settings["referral_bonus_days"] = days
+    settings["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_settings(settings)
+
+
+# ── Tickets DB ────────────────────────────────────────────────
+def load_tickets_db():
+    if os.path.exists(TICKETS_FILE):
+        try:
+            with open(TICKETS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading tickets DB: {e}")
+    return {}
+
+
+def save_tickets_db(data):
+    try:
+        with open(TICKETS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving tickets DB: {e}")
+
+
+tickets_db = load_tickets_db()
+
+# next ticket id
+_next_ticket_id = max((int(k) for k in tickets_db if k.isdigit()), default=0) + 1
+
+
+def create_ticket(tg_id: int, tg_username: str | None, text: str) -> str:
+    global _next_ticket_id
+    tid = str(_next_ticket_id)
+    _next_ticket_id += 1
+    tickets_db[tid] = {
+        "tg_id": tg_id,
+        "tg_username": tg_username,
+        "status": "open",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "messages": [{"from": "user", "text": text, "ts": datetime.now(timezone.utc).isoformat()}],
+    }
+    save_tickets_db(tickets_db)
+    return tid
+
+
+def get_open_ticket_for_user(tg_id: int):
+    for tid, t in tickets_db.items():
+        if t.get("tg_id") == tg_id and t.get("status") == "open":
+            return tid, t
+    return None, None
+
+
+# ── Required channel helpers ──────────────────────────────────
+def get_required_channel() -> str | None:
+    ch = settings.get("required_channel")
+    if isinstance(ch, str) and ch.strip():
+        return ch.strip().lstrip("@")
+    return None
+
+
+def set_required_channel(value: str | None):
+    settings["required_channel"] = value
+    settings["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_settings(settings)
+
+
+async def check_channel_subscription(user_id: int) -> bool:
+    channel = get_required_channel()
+    if not channel:
+        return True
+    try:
+        member = await bot.get_chat_member(f"@{channel}", user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception as e:
+        logging.warning(f"Channel check failed for {user_id}: {e}")
+        return True  # if check fails, don't block
+
+
+def get_channel_not_subscribed_text() -> str:
+    channel = get_required_channel()
+    return (
+        f"📢 <b>Для продолжения подпишитесь на наш канал:</b>\n\n"
+        f"👉 @{channel}\n\n"
+        f"После подписки нажмите кнопку ниже."
+    )
+
+
+def get_channel_check_keyboard(return_to: str = "back_to_menu"):
+    channel = get_required_channel()
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="📢 Подписаться", url=f"https://t.me/{channel}")],
+        [types.InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{return_to}")],
+    ])
+    return kb
+
+
 def get_user_pending_promo_code(panel_username: str):
     entry = users_db.get(panel_username, {})
     code = entry.get("pending_promo")
@@ -530,6 +667,23 @@ class AdminPromoStates(StatesGroup):
     waiting_for_days = State()
 
 
+class BroadcastStates(StatesGroup):
+    waiting_for_message = State()
+    waiting_for_confirm = State()
+
+
+class TicketUserStates(StatesGroup):
+    waiting_for_message = State()
+
+
+class AdminTicketStates(StatesGroup):
+    waiting_for_reply = State()
+
+
+class AdminChannelStates(StatesGroup):
+    waiting_for_channel = State()
+
+
 class PromoUserStates(StatesGroup):
     waiting_for_code = State()
 
@@ -650,7 +804,8 @@ def get_main_keyboard():
         [types.InlineKeyboardButton(text="👤 Личный кабинет", callback_data="cabinet")],
         [types.InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy_menu")],
         [types.InlineKeyboardButton(text="🎁 Пробный период (3 дня)", callback_data="trial_subs")],
-        [types.InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/Mizuvil")],
+        [types.InlineKeyboardButton(text="👥 Реферальная программа", callback_data="referral_menu")],
+        [types.InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_menu")],
     ])
     return kb
 
@@ -1245,10 +1400,38 @@ async def process_new_star_buy_bot(m: Message, state: FSMContext):
     await m.answer("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
     await state.clear()
 
-# start
+# start (with referral deep link support: /start ref_12345)
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
-    logging.info(f"Команда /start от {m.from_user.username or m.from_user.id}")
+    tg_user = m.from_user
+    logging.info(f"Команда /start от {tg_user.username or tg_user.id}")
+
+    # Handle referral deep link: /start ref_<REFERRER_TG_ID>
+    args = m.text.split(maxsplit=1)
+    if len(args) > 1 and args[1].startswith("ref_"):
+        try:
+            referrer_id = int(args[1][4:])
+        except (ValueError, IndexError):
+            referrer_id = None
+
+        my_id = str(tg_user.id)
+        if referrer_id and referrer_id != tg_user.id and my_id not in referrals_db:
+            # Record this user as referred
+            referrals_db[my_id] = {
+                "referred_by": referrer_id,
+                "registered_at": datetime.now(timezone.utc).isoformat(),
+                "rewarded": False,
+            }
+            # Add to referrer's list
+            ref_key = str(referrer_id)
+            referrals_db.setdefault(ref_key, {})
+            ref_list = referrals_db[ref_key].get("referred_users", [])
+            if tg_user.id not in ref_list:
+                ref_list.append(tg_user.id)
+            referrals_db[ref_key]["referred_users"] = ref_list
+            save_referrals_db(referrals_db)
+            logging.info(f"Referral: {tg_user.id} referred by {referrer_id}")
+
     text = (
         "👋 <b>Привет! Я PasarGuard VPN Bot</b> — твой проводник в свободный интернет!\n\n"
         "🚀 <b>Почему выбирают нас?</b>\n"
@@ -1413,6 +1596,17 @@ async def cb_qr_back(cq: types.CallbackQuery):
 async def cb_buy_menu(cq: types.CallbackQuery):
     """Show buy menu"""
     tg_user = cq.from_user
+
+    # Check channel subscription
+    if not await check_channel_subscription(tg_user.id):
+        await cq.message.edit_text(
+            get_channel_not_subscribed_text(),
+            reply_markup=get_channel_check_keyboard("buy_menu"),
+            parse_mode="HTML",
+        )
+        await cq.answer()
+        return
+
     text = build_buy_menu_text(tg_user)
     try:
         await cq.message.edit_text(text, reply_markup=get_buy_keyboard(tg_user), parse_mode="HTML")
@@ -1491,10 +1685,41 @@ async def promo_user_entered(m: Message, state: FSMContext):
         )
         await m.answer(text, reply_markup=get_buy_keyboard(tg_user), parse_mode="HTML")
 
+@dp.callback_query(lambda cq: cq.data.startswith("check_sub:"))
+async def cb_check_sub(cq: types.CallbackQuery):
+    """Re-check channel subscription and redirect"""
+    return_to = cq.data.split(":", 1)[1]
+    ok = await check_channel_subscription(cq.from_user.id)
+    if not ok:
+        await cq.answer("❌ Вы ещё не подписались на канал!", show_alert=True)
+        return
+    await cq.answer("✅ Спасибо за подписку!")
+    # Redirect to the original destination
+    if return_to == "buy_menu":
+        await cb_buy_menu(cq)
+    elif return_to == "trial_subs":
+        # Simulate trial press
+        cq.data = "trial_subs"
+        await cb_trial_subs(cq)
+    else:
+        await cb_back_to_menu(cq)
+
+
 @dp.callback_query(lambda cq: cq.data == "trial_subs")
 async def cb_trial_subs(cq: types.CallbackQuery):
     """Activate trial subscription"""
     tg_user = cq.from_user
+
+    # Check channel subscription
+    if not await check_channel_subscription(tg_user.id):
+        await cq.message.edit_text(
+            get_channel_not_subscribed_text(),
+            reply_markup=get_channel_check_keyboard("trial_subs"),
+            parse_mode="HTML",
+        )
+        await cq.answer()
+        return
+
     panel_username = build_panel_username(tg_user)
     
     # Check if trial already used
@@ -1938,6 +2163,37 @@ async def on_success(m: Message):
     save_users_db(users_db)
     logging.info(f"Updated user {panel_username} (TG ID: {tg_user.id}) in database")
     
+    # ── Referral reward: give bonus days to referrer on first purchase ──
+    my_ref = referrals_db.get(str(tg_user.id))
+    if my_ref and isinstance(my_ref, dict) and not my_ref.get("rewarded") and my_ref.get("referred_by"):
+        referrer_id = my_ref["referred_by"]
+        bonus_days = get_referral_bonus_days()
+        if bonus_days > 0:
+            # Find referrer's panel username
+            referrer_panel = None
+            for pu, info in users_db.items():
+                if isinstance(info, dict) and info.get("tg_id") == referrer_id:
+                    referrer_panel = pu
+                    break
+            if referrer_panel:
+                ref_user_data = await panel_get_user(referrer_panel)
+                if ref_user_data:
+                    ref_expire_dt = parse_expire(ref_user_data.get("expire"))
+                    if ref_expire_dt and ref_expire_dt > datetime.now(timezone.utc):
+                        new_ref_expire = int((ref_expire_dt + timedelta(days=bonus_days)).timestamp())
+                        await panel_update_user(referrer_panel, new_ref_expire)
+                        try:
+                            await bot.send_message(
+                                referrer_id,
+                                f"🎉 <b>Реферальный бонус!</b>\n\n"
+                                f"Ваш друг оформил подписку. Вам начислено <b>+{bonus_days} дней</b>!",
+                                parse_mode="HTML",
+                            )
+                        except Exception as e:
+                            logging.warning(f"Could not notify referrer {referrer_id}: {e}")
+            my_ref["rewarded"] = True
+            save_referrals_db(referrals_db)
+
     # Get subscription URL (prefer API response, fallback to template)
     subs_link = res.get("subscription_url")
     if not subs_link:
@@ -2090,6 +2346,526 @@ async def cmd_test_notify(m: Message):
     ])
     
     await m.answer(text, reply_markup=kb, parse_mode="HTML")
+
+# ══════════════════════════════════════════════════════════════
+#  REFERRAL MENU
+# ══════════════════════════════════════════════════════════════
+@dp.callback_query(lambda cq: cq.data == "referral_menu")
+async def cb_referral_menu(cq: types.CallbackQuery):
+    tg_user = cq.from_user
+    me = await bot.get_me()
+    ref_link = f"https://t.me/{me.username}?start=ref_{tg_user.id}"
+
+    my_data = referrals_db.get(str(tg_user.id), {})
+    referred_list = my_data.get("referred_users", []) if isinstance(my_data, dict) else []
+    count = len(referred_list)
+    bonus_days = get_referral_bonus_days()
+
+    text = (
+        "👥 <b>Реферальная программа</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Приглашайте друзей и получайте <b>+{bonus_days} дней</b> к подписке "
+        f"за каждого друга, который оформит подписку!\n\n"
+        f"📊 <b>Вы привели:</b> {count} чел.\n\n"
+        f"🔗 <b>Ваша реферальная ссылка:</b>\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"👆 <i>Нажмите, чтобы скопировать</i>"
+    )
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=f"Подключайся к VPN! {ref_link}")],
+        [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
+    ])
+
+    try:
+        await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        if "not modified" not in str(e):
+            logging.error(f"Error editing referral menu: {e}")
+    await cq.answer()
+
+
+# ══════════════════════════════════════════════════════════════
+#  SUPPORT / TICKET SYSTEM
+# ══════════════════════════════════════════════════════════════
+@dp.callback_query(lambda cq: cq.data == "support_menu")
+async def cb_support_menu(cq: types.CallbackQuery):
+    tg_user = cq.from_user
+    tid, ticket = get_open_ticket_for_user(tg_user.id)
+
+    if tid:
+        msgs = ticket.get("messages", [])
+        last_from = msgs[-1]["from"] if msgs else "—"
+        status_text = "ожидает ответа админа" if last_from == "user" else "есть ответ"
+        text = (
+            "🎫 <b>Поддержка</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n\n"
+            f"У вас есть открытый тикет <b>#{tid}</b> ({status_text}).\n\n"
+            "Отправьте сообщение, оно будет добавлено к тикету.\n"
+            "Или закройте тикет кнопкой ниже."
+        )
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="💬 Написать в тикет", callback_data="ticket_write")],
+            [types.InlineKeyboardButton(text="📋 История", callback_data=f"ticket_history:{tid}")],
+            [types.InlineKeyboardButton(text="❌ Закрыть тикет", callback_data=f"ticket_close:{tid}")],
+            [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
+        ])
+    else:
+        text = (
+            "🆘 <b>Поддержка</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n\n"
+            "Опишите вашу проблему, и наш специалист ответит в ближайшее время."
+        )
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="📝 Создать тикет", callback_data="ticket_write")],
+            [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
+        ])
+
+    try:
+        await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        if "not modified" not in str(e):
+            logging.error(f"Error editing support menu: {e}")
+    await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data == "ticket_write")
+async def cb_ticket_write(cq: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(TicketUserStates.waiting_for_message)
+    await cq.message.edit_text(
+        "📝 <b>Напишите ваше сообщение:</b>\n\n"
+        "Опишите проблему одним сообщением.",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data="support_menu")]
+        ]),
+    )
+    await cq.answer()
+
+
+@dp.message(TicketUserStates.waiting_for_message, F.text)
+async def ticket_user_message(m: Message, state: FSMContext):
+    tg_user = m.from_user
+    text = m.text.strip()
+    if not text:
+        await m.answer("❌ Пожалуйста, отправьте текстовое сообщение.")
+        return
+
+    tid, ticket = get_open_ticket_for_user(tg_user.id)
+    if tid:
+        # Append to existing ticket
+        ticket["messages"].append({
+            "from": "user",
+            "text": text,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        save_tickets_db(tickets_db)
+    else:
+        tid = create_ticket(tg_user.id, tg_user.username, text)
+
+    await state.clear()
+    await m.answer(
+        f"✅ <b>Тикет #{tid}</b> — сообщение отправлено!\n\n"
+        "Ожидайте ответа от поддержки.",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
+        ]),
+    )
+
+    # Notify admin
+    display_name = f"@{tg_user.username}" if tg_user.username else str(tg_user.id)
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"🎫 <b>Тикет #{tid}</b> от {display_name}\n\n"
+            f"{text}",
+            parse_mode="HTML",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="💬 Ответить", callback_data=f"admin_ticket_reply:{tid}")],
+                [types.InlineKeyboardButton(text="❌ Закрыть", callback_data=f"admin_ticket_close:{tid}")],
+            ]),
+        )
+    except Exception as e:
+        logging.error(f"Could not notify admin about ticket: {e}")
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("ticket_history:"))
+async def cb_ticket_history(cq: types.CallbackQuery):
+    tid = cq.data.split(":", 1)[1]
+    ticket = tickets_db.get(tid)
+    if not ticket or ticket.get("tg_id") != cq.from_user.id:
+        await cq.answer("Тикет не найден", show_alert=True)
+        return
+
+    lines = [f"🎫 <b>Тикет #{tid}</b>\n"]
+    for msg in ticket.get("messages", [])[-10:]:
+        sender = "👤 Вы" if msg["from"] == "user" else "👨‍💻 Поддержка"
+        lines.append(f"{sender}: {msg['text']}")
+
+    text = "\n\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "…"
+
+    await cq.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="support_menu")],
+        ]),
+    )
+    await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("ticket_close:"))
+async def cb_ticket_close(cq: types.CallbackQuery):
+    tid = cq.data.split(":", 1)[1]
+    ticket = tickets_db.get(tid)
+    if not ticket:
+        await cq.answer("Тикет не найден", show_alert=True)
+        return
+    # Allow user or admin to close
+    if ticket.get("tg_id") != cq.from_user.id and cq.from_user.id != ADMIN_ID:
+        return
+    ticket["status"] = "closed"
+    ticket["closed_at"] = datetime.now(timezone.utc).isoformat()
+    save_tickets_db(tickets_db)
+    await cq.answer("✅ Тикет закрыт", show_alert=True)
+    if cq.from_user.id == ADMIN_ID:
+        await cb_admin_tickets(cq)
+    else:
+        await cb_support_menu(cq)
+
+
+# ══════════════════════════════════════════════════════════════
+#  ADMIN: TICKETS
+# ══════════════════════════════════════════════════════════════
+@dp.callback_query(lambda cq: cq.data == "admin_tickets")
+async def cb_admin_tickets(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    open_tickets = [(tid, t) for tid, t in tickets_db.items() if t.get("status") == "open"]
+    if not open_tickets:
+        text = "🎫 <b>Тикеты</b>\n\nОткрытых тикетов нет."
+    else:
+        lines = ["🎫 <b>Открытые тикеты:</b>\n"]
+        for tid, t in open_tickets[-20:]:
+            uname = t.get("tg_username")
+            display = f"@{uname}" if uname else str(t.get("tg_id"))
+            msgs_count = len(t.get("messages", []))
+            lines.append(f"• #{tid} — {display} ({msgs_count} сообщ.)")
+        text = "\n".join(lines)
+
+    buttons = []
+    for tid, t in open_tickets[-10:]:
+        uname = t.get("tg_username")
+        display = f"@{uname}" if uname else str(t.get("tg_id"))
+        buttons.append([types.InlineKeyboardButton(text=f"#{tid} {display}", callback_data=f"admin_ticket_view:{tid}")])
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    try:
+        await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        if "not modified" not in str(e):
+            logging.error(f"Error in admin tickets: {e}")
+    await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("admin_ticket_view:"))
+async def cb_admin_ticket_view(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+    tid = cq.data.split(":", 1)[1]
+    ticket = tickets_db.get(tid)
+    if not ticket:
+        await cq.answer("Тикет не найден", show_alert=True)
+        return
+
+    uname = ticket.get("tg_username")
+    display = f"@{uname}" if uname else str(ticket.get("tg_id"))
+    lines = [f"🎫 <b>Тикет #{tid}</b> от {display}\n"]
+
+    for msg in ticket.get("messages", [])[-15:]:
+        sender = "👤 Клиент" if msg["from"] == "user" else "👨‍💻 Вы"
+        lines.append(f"{sender}: {msg['text']}")
+
+    text = "\n\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "…"
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="💬 Ответить", callback_data=f"admin_ticket_reply:{tid}")],
+        [types.InlineKeyboardButton(text="❌ Закрыть тикет", callback_data=f"admin_ticket_close:{tid}")],
+        [types.InlineKeyboardButton(text="🔙 К списку", callback_data="admin_tickets")],
+    ])
+    await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("admin_ticket_reply:"))
+async def cb_admin_ticket_reply(cq: types.CallbackQuery, state: FSMContext):
+    if cq.from_user.id != ADMIN_ID:
+        return
+    tid = cq.data.split(":", 1)[1]
+    await state.clear()
+    await state.update_data(ticket_id=tid)
+    await state.set_state(AdminTicketStates.waiting_for_reply)
+    await cq.message.edit_text(
+        f"💬 <b>Ответ на тикет #{tid}</b>\n\nОтправьте текст ответа:",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin_ticket_view:{tid}")]
+        ]),
+    )
+    await cq.answer()
+
+
+@dp.message(AdminTicketStates.waiting_for_reply, F.text)
+async def admin_ticket_reply_msg(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    tid = data.get("ticket_id")
+    ticket = tickets_db.get(tid)
+    if not ticket:
+        await m.answer("❌ Тикет не найден.")
+        await state.clear()
+        return
+
+    reply_text = m.text.strip()
+    ticket["messages"].append({
+        "from": "admin",
+        "text": reply_text,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    })
+    save_tickets_db(tickets_db)
+    await state.clear()
+
+    await m.answer(f"✅ Ответ отправлен в тикет #{tid}")
+
+    # Notify user
+    user_tg_id = ticket.get("tg_id")
+    if user_tg_id:
+        try:
+            await bot.send_message(
+                user_tg_id,
+                f"💬 <b>Ответ поддержки (тикет #{tid}):</b>\n\n{reply_text}",
+                parse_mode="HTML",
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="💬 Ответить", callback_data="ticket_write")],
+                    [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
+                ]),
+            )
+        except Exception as e:
+            logging.error(f"Could not send ticket reply to user {user_tg_id}: {e}")
+            await m.answer(f"⚠️ Не удалось отправить ответ пользователю: {e}")
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("admin_ticket_close:"))
+async def cb_admin_ticket_close(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+    tid = cq.data.split(":", 1)[1]
+    ticket = tickets_db.get(tid)
+    if not ticket:
+        await cq.answer("Тикет не найден", show_alert=True)
+        return
+    ticket["status"] = "closed"
+    ticket["closed_at"] = datetime.now(timezone.utc).isoformat()
+    save_tickets_db(tickets_db)
+
+    # Notify user
+    user_tg_id = ticket.get("tg_id")
+    if user_tg_id:
+        try:
+            await bot.send_message(
+                user_tg_id,
+                f"🎫 Тикет #{tid} закрыт поддержкой.\nЕсли проблема не решена, создайте новый тикет.",
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
+                ]),
+            )
+        except Exception:
+            pass
+
+    await cq.answer("✅ Тикет закрыт", show_alert=True)
+    await cb_admin_tickets(cq)
+
+
+# ══════════════════════════════════════════════════════════════
+#  ADMIN: CHANNEL CONFIG
+# ══════════════════════════════════════════════════════════════
+@dp.callback_query(lambda cq: cq.data == "admin_channel")
+async def cb_admin_channel(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    channel = get_required_channel()
+    if channel:
+        text = f"📢 <b>Обязательный канал:</b> @{channel}\n\nПользователи должны подписаться перед покупкой."
+    else:
+        text = "📢 <b>Обязательный канал:</b> не задан\n\nПользователи могут покупать без подписки."
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✏️ Задать канал", callback_data="admin_channel_set")],
+        [types.InlineKeyboardButton(text="🗑 Убрать канал", callback_data="admin_channel_remove")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
+    ])
+    await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data == "admin_channel_set")
+async def cb_admin_channel_set(cq: types.CallbackQuery, state: FSMContext):
+    if cq.from_user.id != ADMIN_ID:
+        return
+    await state.clear()
+    await state.set_state(AdminChannelStates.waiting_for_channel)
+    await cq.message.edit_text(
+        "📢 Отправьте username канала (например <code>@mychannel</code>).\n\n"
+        "⚠️ Бот должен быть администратором этого канала!",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_channel")]
+        ]),
+    )
+    await cq.answer()
+
+
+@dp.message(AdminChannelStates.waiting_for_channel, F.text)
+async def admin_channel_input(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    raw = m.text.strip().lstrip("@")
+    if not raw or len(raw) < 3:
+        await m.answer("❌ Введите корректный username канала.")
+        return
+
+    # Verify bot is admin of the channel
+    try:
+        chat = await bot.get_chat(f"@{raw}")
+        me = await bot.get_me()
+        member = await bot.get_chat_member(chat.id, me.id)
+        if member.status not in ("administrator", "creator"):
+            await m.answer("❌ Бот не является администратором этого канала. Добавьте бота и повторите.")
+            return
+    except Exception as e:
+        await m.answer(f"❌ Не удалось проверить канал @{raw}: {e}")
+        return
+
+    set_required_channel(raw)
+    await state.clear()
+    await m.answer(f"✅ Канал установлен: @{raw}\n\nТеперь пользователи должны подписаться перед покупкой.", parse_mode="HTML")
+    await m.answer("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+
+
+@dp.callback_query(lambda cq: cq.data == "admin_channel_remove")
+async def cb_admin_channel_remove(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+    set_required_channel(None)
+    await cq.answer("✅ Обязательный канал убран", show_alert=True)
+    await cb_admin_channel(cq)
+
+
+# ══════════════════════════════════════════════════════════════
+#  ADMIN: BROADCAST
+# ══════════════════════════════════════════════════════════════
+@dp.callback_query(lambda cq: cq.data == "admin_broadcast")
+async def cb_admin_broadcast(cq: types.CallbackQuery, state: FSMContext):
+    if cq.from_user.id != ADMIN_ID:
+        return
+    await state.clear()
+
+    total = len(set(info.get("tg_id") for info in users_db.values() if isinstance(info, dict) and info.get("tg_id")))
+
+    await state.set_state(BroadcastStates.waiting_for_message)
+    await cq.message.edit_text(
+        f"📨 <b>Рассылка</b>\n\n"
+        f"Всего пользователей: <b>{total}</b>\n\n"
+        f"Отправьте текст рассылки (поддерживается HTML-разметка).",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back")]
+        ]),
+    )
+    await cq.answer()
+
+
+@dp.message(BroadcastStates.waiting_for_message, F.text)
+async def broadcast_text_entered(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    await state.update_data(broadcast_text=m.text)
+    await state.set_state(BroadcastStates.waiting_for_confirm)
+
+    await m.answer(
+        f"📨 <b>Превью рассылки:</b>\n\n{m.text}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Отправить? Напишите <b>да</b> для подтверждения.",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back")]
+        ]),
+    )
+
+
+@dp.message(BroadcastStates.waiting_for_confirm, F.text)
+async def broadcast_confirm(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+
+    if m.text.strip().lower() not in ("да", "yes", "д", "y"):
+        await m.answer("❌ Рассылка отменена.")
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    text = data.get("broadcast_text")
+    await state.clear()
+
+    if not text:
+        await m.answer("❌ Текст рассылки пуст.")
+        return
+
+    # Collect unique tg_ids
+    tg_ids = set()
+    for info in users_db.values():
+        if isinstance(info, dict) and info.get("tg_id"):
+            tg_ids.add(info["tg_id"])
+
+    sent = 0
+    failed = 0
+    status_msg = await m.answer(f"📨 Рассылка... 0/{len(tg_ids)}")
+
+    for i, tg_id in enumerate(tg_ids, 1):
+        try:
+            await bot.send_message(tg_id, text, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            failed += 1
+
+        if i % 25 == 0:
+            try:
+                await status_msg.edit_text(f"📨 Рассылка... {i}/{len(tg_ids)} (✅ {sent} / ❌ {failed})")
+            except Exception:
+                pass
+            await asyncio.sleep(1)  # Telegram rate limit
+
+    try:
+        await status_msg.edit_text(
+            f"✅ <b>Рассылка завершена</b>\n\n"
+            f"Всего: {len(tg_ids)}\n"
+            f"✅ Доставлено: {sent}\n"
+            f"❌ Не доставлено: {failed}",
+            parse_mode="HTML",
+        )
+    except Exception:
+        await m.answer(f"✅ Рассылка завершена: {sent} доставлено, {failed} не доставлено")
+
 
 if __name__ == "__main__":
     # Fix SSL certificate verification issue on Windows (duplicate but safe)
