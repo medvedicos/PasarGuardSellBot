@@ -5,6 +5,7 @@ import asyncio
 import uuid
 import json
 import re
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 import aiohttp
 # PasarGuard panel integration via direct HTTP API calls
@@ -2480,7 +2481,7 @@ async def cb_referral_menu(cq: types.CallbackQuery):
     )
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=f"Привет! Пользуюсь одним сервисом — интернет есть на сервере «Russia» даже при «белых списках». Можно потестить 3 дня бесплатно. Попробуй, мне за это ещё бонус дадут) {ref_link}")],
+        [types.InlineKeyboardButton(text="📤 Поделиться ссылкой", url="https://t.me/share/url?url=" + quote(ref_link, safe="") + "&text=" + quote("Привет! Пользуюсь одним сервисом — интернет есть на сервере «Russia» даже при «белых списках». Можно потестить 3 дня бесплатно. Попробуй, мне за это ещё бонус дадут)", safe=""))],
         [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
     ])
 
