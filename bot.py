@@ -239,6 +239,7 @@ def get_admin_keyboard():
         [types.InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin_promos")],
         [types.InlineKeyboardButton(text=channel_text, callback_data="admin_channel")],
         [types.InlineKeyboardButton(text="🗂 Группы новых юзеров", callback_data="admin_groups")],
+        [types.InlineKeyboardButton(text=f"👥 Реферал: +{get_referral_bonus_days()} дн.", callback_data="admin_referral_days")],
         [types.InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_broadcast")],
         [types.InlineKeyboardButton(text="🎫 Тикеты", callback_data="admin_tickets")],
         [types.InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance")],
@@ -718,6 +719,10 @@ class AdminTicketStates(StatesGroup):
 
 class AdminChannelStates(StatesGroup):
     waiting_for_channel = State()
+
+
+class AdminReferralStates(StatesGroup):
+    waiting_for_days = State()
 
 
 class PromoUserStates(StatesGroup):
@@ -3032,6 +3037,49 @@ async def cb_admin_group_toggle(cq: types.CallbackQuery):
     await cq.answer("✅ Сохранено")
     # Refresh the groups menu
     await cb_admin_groups(cq)
+
+
+# ══════════════════════════════════════════════════════════════
+#  ADMIN: REFERRAL BONUS DAYS
+# ══════════════════════════════════════════════════════════════
+@dp.callback_query(lambda cq: cq.data == "admin_referral_days")
+async def cb_admin_referral_days(cq: types.CallbackQuery, state: FSMContext):
+    if cq.from_user.id != ADMIN_ID:
+        return
+    current = get_referral_bonus_days()
+    await state.clear()
+    await state.set_state(AdminReferralStates.waiting_for_days)
+    await cq.message.edit_text(
+        f"👥 <b>Реферальный бонус</b>\n\n"
+        f"Сейчас: <b>+{current} дней</b> за каждого приведённого друга.\n\n"
+        f"Введите новое количество дней:",
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back")]
+        ]),
+    )
+    await cq.answer()
+
+
+@dp.message(AdminReferralStates.waiting_for_days, F.text)
+async def admin_referral_days_input(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    try:
+        days = int(m.text)
+        if days < 0:
+            raise ValueError
+    except ValueError:
+        await m.answer("❌ Введите целое число (0 или больше).")
+        return
+
+    set_referral_bonus_days(days)
+    await state.clear()
+    if days == 0:
+        await m.answer("✅ Реферальный бонус <b>отключён</b> (0 дней).", parse_mode="HTML")
+    else:
+        await m.answer(f"✅ Реферальный бонус: <b>+{days} дней</b> за друга.", parse_mode="HTML")
+    await m.answer("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
 
 if __name__ == "__main__":
