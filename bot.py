@@ -405,10 +405,12 @@ PANEL_ADMIN_USERNAME = os.getenv("PANEL_ADMIN_USERNAME")
 PANEL_ADMIN_PASSWORD = os.getenv("PANEL_ADMIN_PASSWORD")
 SUBS_LINK_TEMPLATE = os.getenv("SUBS_LINK_TEMPLATE", f"{PANEL_URL}/sub/{{username}}")
 
-# Proxy/inbound configuration for PasarGuard user creation
+# PasarGuard user creation configuration
 PANEL_PROXY_TYPE = os.getenv("PANEL_PROXY_TYPE", "vless")
-PANEL_INBOUND_TAG = os.getenv("PANEL_INBOUND_TAG", "VLESS TCP REALITY")
 PANEL_PROXY_FLOW = os.getenv("PANEL_PROXY_FLOW", "xtls-rprx-vision")
+# Group IDs for new users (comma-separated, e.g. "2" or "2,3")
+_raw_group_ids = os.getenv("PANEL_GROUP_IDS", "2")
+PANEL_GROUP_IDS = [int(x.strip()) for x in _raw_group_ids.split(",") if x.strip().isdigit()]
 
 if not BOT_TOKEN:
     print("⚠️ BOT_TOKEN не установлен в .env файле")
@@ -573,6 +575,29 @@ async def panel_get_user(username: str):
         logging.error(f"Error fetching user {username}: {e}")
         return None
 
+def parse_expire(expire_val) -> datetime | None:
+    """Parse expire value from PasarGuard (ISO string or unix timestamp)"""
+    if expire_val is None:
+        return None
+    if isinstance(expire_val, str):
+        try:
+            # ISO format: "2026-03-25T00:00:00Z"
+            dt = datetime.fromisoformat(expire_val.replace("Z", "+00:00"))
+            return dt
+        except ValueError:
+            pass
+        try:
+            return datetime.fromtimestamp(float(expire_val), tz=timezone.utc)
+        except (ValueError, TypeError, OSError):
+            return None
+    if isinstance(expire_val, (int, float)):
+        try:
+            return datetime.fromtimestamp(expire_val, tz=timezone.utc)
+        except (ValueError, TypeError, OSError):
+            return None
+    return None
+
+
 # Format user info for display
 def format_user_info(user_data: dict) -> str:
     """Format user subscription info for display"""
@@ -589,8 +614,8 @@ def format_user_info(user_data: dict) -> str:
     status_emoji = "✅" if status == "active" else "⛔"
     
     # Format expire date
-    if expire:
-        expire_dt = datetime.fromtimestamp(expire, tz=timezone.utc)
+    expire_dt = parse_expire(expire)
+    if expire_dt:
         expire_date = expire_dt.strftime("%d.%m.%Y")
         days_left = (expire_dt - datetime.now(timezone.utc)).days
         expire_text = f"{expire_date} ({days_left} дней)"
@@ -667,13 +692,13 @@ async def panel_create_user(username: str, expire_ts: int):
 
         payload = {
             "username": username,
-            "proxies": {
+            "proxy_settings": {
                 PANEL_PROXY_TYPE: {
                     "id": str(uuid.uuid4()),
                     "flow": PANEL_PROXY_FLOW
                 }
             },
-            "inbounds": {PANEL_PROXY_TYPE: [PANEL_INBOUND_TAG]},
+            "group_ids": PANEL_GROUP_IDS,
             "data_limit": 0,
             "expire": expire_ts,
             "status": "active"
@@ -1481,8 +1506,8 @@ async def cb_trial_subs(cq: types.CallbackQuery):
     # Check if user already has active subscription
     user_data = await panel_get_user(panel_username)
     if user_data and user_data.get("status") == "active":
-        expire_ts = user_data.get("expire")
-        if expire_ts and expire_ts > datetime.now(timezone.utc).timestamp():
+        expire_dt_check = parse_expire(user_data.get("expire"))
+        if expire_dt_check and expire_dt_check > datetime.now(timezone.utc):
             await cq.answer("❌ У вас уже есть активная подписка!", show_alert=True)
             return
 
@@ -1855,10 +1880,10 @@ async def on_success(m: Message):
     
     # Determine expiry date - ALWAYS add to existing expiry if user exists
     user_data = await panel_get_user(panel_username)
-    if user_data and user_data.get("expire"):
+    current_expire_dt = parse_expire(user_data.get("expire")) if user_data else None
+    if user_data and current_expire_dt:
         # User already has subscription, add days to current expiry
-        current_expire_ts = user_data.get("expire")
-        expire_dt = datetime.fromtimestamp(current_expire_ts, tz=timezone.utc) + timedelta(days=days)
+        expire_dt = current_expire_dt + timedelta(days=days)
         if payment_type == "renew":
             logging.info(f"Renewal: {plan_key} ({days} дней added to existing subscription)")
         else:
@@ -1950,7 +1975,7 @@ async def run_subscription_check():
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {token}"}
 
-            async with session.get(f"{PANEL_URL}/api/user/s", headers=headers, ssl=False) as resp:
+            async with session.get(f"{PANEL_URL}/api/users", headers=headers, ssl=False) as resp:
                 if resp.status != 200:
                     logging.warning(f"Could not fetch users: {resp.status}")
                     return
@@ -1962,23 +1987,25 @@ async def run_subscription_check():
                 
                 for user in users:
                     username = user.get("username")
-                    expire_ts = user.get("expire")
-                    
+                    expire_val = user.get("expire")
+
                     # Skip if no expire date
-                    if not expire_ts or not username:
+                    if not expire_val or not username:
                         continue
-                    
+
                     # Skip if user not in our database
                     if username not in users_db:
                         continue
-                    
+
                     user_info = users_db[username]
                     tg_id = user_info.get("tg_id")
-                    
+
                     if not tg_id:
                         continue
-                    
-                    expire_dt = datetime.fromtimestamp(expire_ts, tz=timezone.utc)
+
+                    expire_dt = parse_expire(expire_val)
+                    if not expire_dt:
+                        continue
                     time_left = (expire_dt - now).total_seconds()
                     
                     # Only send notification if subscription is active and about to expire
