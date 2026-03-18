@@ -1433,7 +1433,7 @@ async def cmd_start(m: Message):
             logging.info(f"Referral: {tg_user.id} referred by {referrer_id}")
 
     text = (
-        "👋 <b>Привет! Я PasarGuard VPN Bot</b> — твой проводник в свободный интернет!\n\n"
+        "👋 <b>Привет! Я MiSa Link</b> — твой проводник в свободный интернет!\n\n"
         "🚀 <b>Почему выбирают нас?</b>\n"
         "• Высокая скорость без ограничений\n"
         "• Работает Instagram, YouTube, Netflix и др.\n"
@@ -1833,7 +1833,7 @@ async def cb_trial_subs(cq: types.CallbackQuery):
 async def cb_back_to_menu(cq: types.CallbackQuery):
     """Go back to main menu"""
     text = (
-        "👋 <b>Привет! Я PasarGuard VPN Bot</b> — твой проводник в свободный интернет!\n\n"
+        "👋 <b>Привет! Я MiSa Link</b> — твой проводник в свободный интернет!\n\n"
         "🚀 <b>Почему выбирают нас?</b>\n"
         "• Высокая скорость без ограничений\n"
         "• Работает Instagram, YouTube, Netflix и др.\n"
