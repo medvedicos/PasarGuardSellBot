@@ -2480,7 +2480,7 @@ async def cb_referral_menu(cq: types.CallbackQuery):
     )
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=f"Подключайся к VPN! {ref_link}")],
+        [types.InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=f"Привет! Пользуюсь одним сервисом — интернет есть на сервере «Russia» даже при «белых списках». Можно потестить 3 дня бесплатно. Попробуй, мне за это ещё бонус дадут) {ref_link}")],
         [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
     ])
 
