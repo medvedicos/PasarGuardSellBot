@@ -53,10 +53,12 @@ def load_settings():
                         data["required_channel"] = None
                     if "referral_bonus_days" not in data:
                         data["referral_bonus_days"] = 3
+                    if "user_group_ids" not in data:
+                        data["user_group_ids"] = None
                     return data
         except Exception as e:
             logging.error(f"Error loading settings: {e}")
-    return {"maintenance_mode": False, "star_rub_rate": None, "star_buy_url": "https://t.me/PremiumBot", "required_channel": None, "referral_bonus_days": 3}
+    return {"maintenance_mode": False, "star_rub_rate": None, "star_buy_url": "https://t.me/PremiumBot", "required_channel": None, "referral_bonus_days": 3, "user_group_ids": None}
 
 
 def save_settings(data: dict):
@@ -236,6 +238,7 @@ def get_admin_keyboard():
         [types.InlineKeyboardButton(text="💰 Сменить тарифы", callback_data="admin_prices")],
         [types.InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin_promos")],
         [types.InlineKeyboardButton(text=channel_text, callback_data="admin_channel")],
+        [types.InlineKeyboardButton(text="🗂 Группы новых юзеров", callback_data="admin_groups")],
         [types.InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_broadcast")],
         [types.InlineKeyboardButton(text="🎫 Тикеты", callback_data="admin_tickets")],
         [types.InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance")],
@@ -523,6 +526,39 @@ def get_channel_check_keyboard(return_to: str = "back_to_menu"):
         [types.InlineKeyboardButton(text="✅ Я подписался", callback_data=f"check_sub:{return_to}")],
     ])
     return kb
+
+
+# ── User group IDs helpers ────────────────────────────────────
+def get_user_group_ids() -> list[int]:
+    """Return group IDs for new users: from settings, fallback to env PANEL_GROUP_IDS."""
+    ids = settings.get("user_group_ids")
+    if isinstance(ids, list) and ids:
+        return [int(x) for x in ids]
+    return PANEL_GROUP_IDS  # fallback to env var
+
+
+def set_user_group_ids(ids: list[int]):
+    settings["user_group_ids"] = ids
+    settings["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_settings(settings)
+
+
+async def fetch_panel_groups() -> list[dict] | None:
+    """Fetch available groups from PasarGuard panel."""
+    try:
+        token = await get_panel_token()
+        if not token:
+            return None
+        async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"Bearer {token}"}
+            async with session.get(f"{PANEL_URL}/api/groups", headers=headers, ssl=False) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("groups", []) if isinstance(data, dict) else data
+                return None
+    except Exception as e:
+        logging.error(f"Error fetching panel groups: {e}")
+        return None
 
 
 def get_user_pending_promo_code(panel_username: str):
@@ -853,7 +889,7 @@ async def panel_create_user(username: str, expire_ts: int):
                     "flow": PANEL_PROXY_FLOW
                 }
             },
-            "group_ids": PANEL_GROUP_IDS,
+            "group_ids": get_user_group_ids(),
             "data_limit": 0,
             "expire": expire_ts,
             "status": "active"
@@ -2919,6 +2955,71 @@ async def broadcast_confirm(m: Message, state: FSMContext):
         )
     except Exception:
         await m.answer(f"✅ Рассылка завершена: {sent} доставлено, {failed} не доставлено")
+
+
+# ══════════════════════════════════════════════════════════════
+#  ADMIN: USER GROUPS CONFIGURATION
+# ══════════════════════════════════════════════════════════════
+@dp.callback_query(lambda cq: cq.data == "admin_groups")
+async def cb_admin_groups(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    groups = await fetch_panel_groups()
+    current_ids = get_user_group_ids()
+
+    if not groups:
+        await cq.answer("❌ Не удалось загрузить группы с панели", show_alert=True)
+        return
+
+    lines = ["🗂 <b>Группы для новых пользователей</b>\n"]
+    buttons = []
+    for g in groups:
+        gid = g.get("id")
+        name = g.get("name", "?")
+        tags = ", ".join(g.get("inbound_tags", []))
+        is_selected = gid in current_ids
+        mark = "✅" if is_selected else "◻️"
+        lines.append(f"{mark} <b>{name}</b> (id={gid}) — {tags}")
+        action = "group_off" if is_selected else "group_on"
+        buttons.append([types.InlineKeyboardButton(text=f"{mark} {name}", callback_data=f"admin_{action}:{gid}")])
+
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
+    text = "\n".join(lines) + "\n\n<i>Нажмите на группу, чтобы включить/выключить.</i>"
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await cq.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await cq.answer()
+
+
+@dp.callback_query(lambda cq: cq.data.startswith("admin_group_on:") or cq.data.startswith("admin_group_off:"))
+async def cb_admin_group_toggle(cq: types.CallbackQuery):
+    if cq.from_user.id != ADMIN_ID:
+        return
+
+    action, gid_str = cq.data.split(":", 1)
+    try:
+        gid = int(gid_str)
+    except ValueError:
+        await cq.answer("Ошибка", show_alert=True)
+        return
+
+    current = get_user_group_ids()
+
+    if action == "admin_group_on":
+        if gid not in current:
+            current.append(gid)
+    else:
+        current = [x for x in current if x != gid]
+
+    if not current:
+        await cq.answer("⚠️ Нужна хотя бы одна группа!", show_alert=True)
+        return
+
+    set_user_group_ids(current)
+    await cq.answer("✅ Сохранено")
+    # Refresh the groups menu
+    await cb_admin_groups(cq)
 
 
 if __name__ == "__main__":
