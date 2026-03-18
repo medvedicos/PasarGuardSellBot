@@ -980,12 +980,22 @@ def build_panel_username(tg_user: types.User):
     else:
         return f"user_{tg_user.id}"
 
+async def clear_chat_history(chat_id: int, up_to_message_id: int):
+    """Delete recent messages in chat to simulate a fresh start."""
+    for msg_id in range(up_to_message_id, max(up_to_message_id - 50, 0), -1):
+        try:
+            await bot.delete_message(chat_id, msg_id)
+        except Exception:
+            pass  # message already deleted, too old, or not ours
+
+
 # Admin command
 @dp.message(Command("admin"))
 async def cmd_admin(m: Message):
     if m.from_user.id != ADMIN_ID:
         return
 
+    await clear_chat_history(m.chat.id, m.message_id)
     await m.answer("🛠 <b>Админ-панель</b>", reply_markup=get_admin_keyboard(), parse_mode="HTML")
 
 
@@ -1467,6 +1477,8 @@ async def cmd_start(m: Message):
             referrals_db[ref_key]["referred_users"] = ref_list
             save_referrals_db(referrals_db)
             logging.info(f"Referral: {tg_user.id} referred by {referrer_id}")
+
+    await clear_chat_history(m.chat.id, m.message_id)
 
     text = (
         "👋 <b>Привет! Я MiSa Link</b> — твой проводник в свободный интернет!\n\n"
