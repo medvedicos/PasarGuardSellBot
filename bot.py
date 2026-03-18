@@ -1687,20 +1687,74 @@ async def promo_user_entered(m: Message, state: FSMContext):
 
 @dp.callback_query(lambda cq: cq.data.startswith("check_sub:"))
 async def cb_check_sub(cq: types.CallbackQuery):
-    """Re-check channel subscription and redirect"""
+    """Re-check channel subscription and redirect to original menu"""
     return_to = cq.data.split(":", 1)[1]
     ok = await check_channel_subscription(cq.from_user.id)
     if not ok:
         await cq.answer("❌ Вы ещё не подписались на канал!", show_alert=True)
         return
     await cq.answer("✅ Спасибо за подписку!")
-    # Redirect to the original destination
+
+    tg_user = cq.from_user
     if return_to == "buy_menu":
-        await cb_buy_menu(cq)
+        text = build_buy_menu_text(tg_user)
+        try:
+            await cq.message.edit_text(text, reply_markup=get_buy_keyboard(tg_user), parse_mode="HTML")
+        except Exception:
+            pass
     elif return_to == "trial_subs":
-        # Simulate trial press
-        cq.data = "trial_subs"
-        await cb_trial_subs(cq)
+        # Directly activate trial without re-checking channel
+        panel_username = build_panel_username(tg_user)
+        user_info = users_db.get(panel_username, {})
+        if user_info.get("trial_used"):
+            await cq.message.edit_text(
+                "❌ Вы уже использовали пробный период!",
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
+                ]),
+            )
+            return
+        user_data = await panel_get_user(panel_username)
+        if user_data and user_data.get("status") == "active":
+            expire_dt_check = parse_expire(user_data.get("expire"))
+            if expire_dt_check and expire_dt_check > datetime.now(timezone.utc):
+                await cq.message.edit_text(
+                    "❌ У вас уже есть активная подписка!",
+                    reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                        [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
+                    ]),
+                )
+                return
+        days = 3
+        expire_dt = datetime.now(timezone.utc) + timedelta(days=days)
+        expire_ts = int(expire_dt.timestamp())
+        if user_data:
+            res = await panel_update_user(panel_username, expire_ts)
+        else:
+            res = await panel_create_user(panel_username, expire_ts)
+        if res:
+            users_db.setdefault(panel_username, {})
+            users_db[panel_username].update({
+                "tg_id": tg_user.id, "tg_username": tg_user.username,
+                "expire_ts": expire_ts, "updated_at": datetime.now(timezone.utc).isoformat(),
+                "trial_used": True,
+            })
+            save_users_db(users_db)
+            subs_link = res.get("subscription_url") or SUBS_LINK_TEMPLATE.format(username=panel_username)
+            text = (
+                f"🎁 <b>Пробный период активирован!</b>\n\n"
+                f"📅 <b>Действует до:</b> {expire_dt.strftime('%d.%m.%Y')}\n\n"
+                f"🔗 <b>Ваша ссылка для подключения:</b>\n<code>{subs_link}</code>\n\n"
+                f"💡 Вставьте её в ваше VPN-приложение."
+            )
+            await cq.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+        else:
+            await cq.message.edit_text(
+                "❌ Ошибка активации. Попробуйте позже.",
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_to_menu")],
+                ]),
+            )
     else:
         await cb_back_to_menu(cq)
 
